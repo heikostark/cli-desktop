@@ -45,12 +45,13 @@ fn print_help_and_exit() {
     println!(
         "rust-desktop – a tmux-based text desktop\n\n\
          Usage:\n  \
-         rust-desktop [--wallpaper <image>] [--config-dir <path>] [--force-tty] [--force-emoji]\n\n\
+         rust-desktop [--wallpaper <image>] [--config-dir <path>] [--force-tty] [--force-emoji] [--no-mouse-setup]\n\n\
          Options:\n  \
          --wallpaper, -w <image>   Set a background image once (saved to wallpaper.json)\n  \
          --config-dir <path>      Use this config directory instead of ~/.config/cli-desktop\n  \
          --force-tty              Force detection: plain tty console (ASCII, 16 colors, no emoji)\n  \
          --force-emoji            Force detection: enable Unicode/emoji\n  \
+         --no-mouse-setup          Don't automatically run `tmux set-option -g mouse on`\n  \
          -h, --help                Show this help\n\n\
          Keys while running:\n  \
          Tab / Shift+Tab or arrow keys       switch icon selection\n  \
@@ -61,7 +62,11 @@ fn print_help_and_exit() {
          u                                   restore the last deleted icon\n  \
          i                                   show detected environment\n\n\
          Configuration lives under ~/.config/cli-desktop/ (icons.json, trash.json,\n\
-         wallpaper.json, settings.json, colors.json) – see the README."
+         wallpaper.json, settings.json, colors.json) – see the README.\n\n\
+         Note: on first run, this also enables tmux's global `mouse` option\n\
+         (`tmux set-option -g mouse on`), since tmux otherwise won't forward\n\
+         mouse clicks from your real terminal into the pane at all. Pass\n\
+         --no-mouse-setup to skip this if you manage that setting yourself."
     );
     std::process::exit(0);
 }
@@ -78,7 +83,9 @@ fn main() -> Result<()> {
     if !tmux::is_inside_tmux() {
         eprintln!(
             "This program must run inside a tmux session.\n\
-             Start it like this, for example:\n\n    tmux new -s desktop rust-desktop\n\n\
+             Start it like this, for example:\n\n    tmux new -s desktop ./rust-desktop\n\n\
+             (use the actual path to the binary — a bare 'rust-desktop' only\n\
+             works if it's on your $PATH, e.g. after 'cargo install --path .')\n\n\
              or start tmux first and then run rust-desktop inside a session."
         );
         std::process::exit(1);
@@ -91,6 +98,7 @@ fn main() -> Result<()> {
     // For testing/debugging only: override detection manually.
     let force_tty = args.iter().any(|a| a == "--force-tty");
     let force_emoji = args.iter().any(|a| a == "--force-emoji");
+    let no_mouse_setup = args.iter().any(|a| a == "--no-mouse-setup");
 
     if let Some(dir) = config_dir_arg {
         config::set_config_dir_override(PathBuf::from(dir));
@@ -99,6 +107,30 @@ fn main() -> Result<()> {
     let capabilities = caps::Capabilities::detect().with_overrides(force_tty, force_emoji);
     eprintln!("Detected environment: {}", capabilities.summary());
     eprintln!("Config directory: {:?}", config::config_dir()?);
+
+    // Without `tmux set-option -g mouse on`, tmux does not forward raw mouse
+    // click events from the outer terminal into this pane at all, no matter
+    // what this program requests via crossterm — clicking icons would then
+    // silently do nothing. We turn this on automatically unless the user
+    // explicitly opted out, and always report what we did (or didn't do).
+    if no_mouse_setup {
+        eprintln!("Skipping tmux mouse setup (--no-mouse-setup passed).");
+    } else {
+        match tmux::mouse_enabled() {
+            Ok(true) => eprintln!("tmux mouse support: already on."),
+            Ok(false) | Err(_) => match tmux::enable_mouse() {
+                Ok(()) => eprintln!(
+                    "tmux mouse support was off; enabled it now (tmux set-option -g mouse on)."
+                ),
+                Err(e) => eprintln!(
+                    "Warning: could not enable tmux mouse support automatically ({}). \
+                     If clicks don't do anything, add 'set -g mouse on' to your ~/.tmux.conf, \
+                     or run 'tmux set-option -g mouse on' manually.",
+                    e
+                ),
+            },
+        }
+    }
 
     let mut cfg = config::DesktopConfig::load_or_default(&capabilities)?;
     if let Some(w) = wallpaper_arg.clone() {

@@ -298,14 +298,86 @@ impl DesktopConfig {
     }
 }
 
+/// Safely embed an arbitrary script as a single `sh -c '...'` argument, so
+/// nested quotes (e.g. inside `$SHELL`/`$EDITOR` values, or the messages
+/// below) can't break out of the generated shell command.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Build a `sh -c '<script>'` command as a single string, with `<script>`
+/// fully quoted/escaped as one unit. Wrapping the *entire* fallback chain
+/// (including all `||`/`()` control flow) inside one `sh -c` argument is
+/// important: it guarantees the script is parsed by POSIX `sh`, regardless
+/// of what the user's actual login shell is. If any part of the fallback
+/// logic were left outside the `sh -c '...'` quoting, it would instead be
+/// parsed by tmux's *default-shell* — whatever the user's login shell
+/// happens to be — and shells like fish or csh/tcsh don't understand
+/// `||`/`(...)` the POSIX way, which could silently break the command.
+fn sh_c(script: &str) -> String {
+    format!("sh -c {}", shell_quote(script))
+}
+
 /// A handful of sensible default icons with programs available on
 /// virtually every Linux system (with fallbacks via `sh -c`).
 /// Nicer glyphs are used when emoji support is detected; the plain tty
 /// console gets the compatible ASCII bracket icons instead.
+///
+/// `$SHELL`/`$EDITOR` are resolved here in Rust rather than embedded as
+/// `${SHELL:-bash}`-style shell syntax in the command string: tmux executes
+/// an icon's `command` via the pane's *default-shell*, which is whatever
+/// the user's login shell happens to be. Not every shell understands that
+/// POSIX parameter-expansion syntax (fish and csh/tcsh notably don't), so
+/// embedding it could silently fail to launch anything on those shells.
+/// Resolving the value ourselves and passing the plain result avoids that
+/// dependency entirely.
+///
+/// Every command below also has a `|| (... ; read x)` fallback, all inside
+/// one `sh -c` call (see `sh_c` above). This matters because a tmux window
+/// closes itself the instant its command exits — if the target program
+/// doesn't exist on a given system (missing editor, missing process
+/// monitor, ...), the window would otherwise flash open and vanish again
+/// within milliseconds, which looks exactly like "nothing happened" when
+/// double-clicking the icon. With the fallback, the window stays open with
+/// a clear message instead.
 fn default_icons(caps: &Capabilities) -> Vec<Icon> {
     let g = |emoji: &str, ascii: &str| -> String {
         if caps.emoji { emoji.to_string() } else { ascii.to_string() }
     };
+    let resolved_shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "bash".to_string());
+    let resolved_editor = std::env::var("EDITOR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "vi".to_string());
+
+    let terminal_cmd = sh_c(&format!(
+        "{shell} || (echo 'Shell not found: {shell}'; echo 'Set \\$SHELL or edit icons.json.'; read x)",
+        shell = resolved_shell
+    ));
+    let editor_candidates: Vec<&str> = {
+        let mut c = vec![resolved_editor.as_str()];
+        for alt in ["vi", "nano"] {
+            if !c.contains(&alt) {
+                c.push(alt);
+            }
+        }
+        c
+    };
+    let editor_cmd = sh_c(&format!(
+        "{chain} || (echo 'No editor found ({tried} all missing).'; echo 'Install one, or edit icons.json.'; read x)",
+        chain = editor_candidates.join(" || "),
+        tried = editor_candidates.join(" / ")
+    ));
+    let files_cmd = sh_c(
+        "ranger || mc || (echo 'No file manager found (ranger / mc missing).'; ls -la; echo; echo 'Press enter to close.'; read x)"
+    );
+    let processes_cmd = sh_c(
+        "htop || top || (echo 'No process monitor found (htop / top missing).'; read x)"
+    );
+
     vec![
         Icon {
             id: 1,
@@ -313,7 +385,7 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
             glyph: g("🖥️", "[T]"),
             x: 4,
             y: 2,
-            command: "${SHELL:-bash}".into(),
+            command: terminal_cmd,
             singleton: false,
         },
         Icon {
@@ -322,7 +394,7 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
             glyph: g("📝", "[E]"),
             x: 4,
             y: 6,
-            command: "${EDITOR:-vi}".into(),
+            command: editor_cmd,
             singleton: false,
         },
         Icon {
@@ -331,7 +403,7 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
             glyph: g("📁", "[D]"),
             x: 4,
             y: 10,
-            command: "sh -c 'ranger || mc || (echo No file manager found; ls -la; read x)'".into(),
+            command: files_cmd,
             singleton: false,
         },
         Icon {
@@ -343,7 +415,7 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
             // A process monitor makes the most sense as a single instance:
             // double-clicking switches to an already-open "Processes"
             // window instead of opening another htop/top window.
-            command: "sh -c 'htop || top'".into(),
+            command: processes_cmd,
             singleton: true,
         },
     ]

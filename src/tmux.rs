@@ -98,3 +98,25 @@ pub fn own_window_index() -> Option<u32> {
     let raw = run_tmux(&["display-message", "-p", "#{window_index}"]).ok()?;
     raw.parse().ok()
 }
+
+/// Read whether tmux's own `mouse` option is currently on.
+pub fn mouse_enabled() -> Result<bool> {
+    let raw = run_tmux(&["show-options", "-g", "mouse"])?;
+    // Output looks like "mouse on" / "mouse off".
+    Ok(raw.trim_end().ends_with("on"))
+}
+
+/// Turn tmux's global `mouse` option on.
+///
+/// This matters a great deal: by default (without a `set -g mouse on` in
+/// the user's `~/.tmux.conf`), tmux does NOT forward raw mouse click events
+/// from the outer terminal into a pane at all, even if the program running
+/// inside that pane (like this one, via crossterm) has requested mouse
+/// reporting. Without this, every click on an icon would silently do
+/// nothing — the single most common reason a mouse-driven tmux program
+/// "doesn't react to clicks". We turn it on automatically so the desktop
+/// works out of the box regardless of the user's tmux configuration.
+pub fn enable_mouse() -> Result<()> {
+    run_tmux(&["set-option", "-g", "mouse", "on"])?;
+    Ok(())
+}

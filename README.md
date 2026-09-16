@@ -7,7 +7,11 @@ image) is operated with the mouse in plain text mode.
 ## How it works
 
 - This process itself runs in **one** tmux window and draws the "desktop
-  surface" there (wallpaper, icons, taskbar, trash).
+  surface" there (wallpaper, icons, taskbar, trash). On startup it also
+  automatically runs `tmux set-option -g mouse on` if it's currently off,
+  since tmux otherwise won't forward mouse clicks from your real terminal
+  into the pane at all (see "Troubleshooting" below; pass `--no-mouse-setup`
+  to skip this).
 - **Double-clicking** an icon → `tmux new-window` opens the associated
   program in a new tmux window and switches to it automatically. You get
   back to the desktop with `tmux next-window` / `Ctrl-b p,n` / by switching
@@ -98,11 +102,60 @@ Additional options:
 ```bash
 ./target/release/rust-desktop --help                      # quick overview of all options/keys
 ./target/release/rust-desktop --config-dir /path/to/dir    # use a different config directory instead of ~/.config/cli-desktop
+./target/release/rust-desktop --no-mouse-setup             # don't auto-enable tmux's 'mouse' option (see Troubleshooting)
 ```
 
 `--config-dir` is handy, for example, for several independent "profiles"
 (different icon sets depending on context) or for testing without touching
 your own configuration.
+
+Optionally, install the binary onto your `$PATH` so a bare `rust-desktop`
+works too (this is what `cargo install` does):
+
+```bash
+cargo install --path .
+tmux new -s desktop rust-desktop
+```
+
+## Troubleshooting
+
+**Icons don't open anything when I double-click them.**
+By default, tmux does *not* forward mouse clicks from your real terminal
+into a pane at all — this needs `set -g mouse on` somewhere in tmux's
+configuration. Without it, this program (or any other mouse-driven program
+running inside tmux, e.g. a mouse-enabled vim) simply never receives click
+events; nothing appears broken, clicks just never arrive. To avoid this
+common trap, rust-desktop automatically runs
+`tmux set-option -g mouse on` once at startup (you'll see a line about this
+on stderr, e.g. in `tmux new -s desktop -- sh -c './target/release/rust-desktop; read'`
+if you want to keep the window open to read it). If clicks still don't do
+anything after that:
+- Confirm it actually got turned on: `tmux show-options -g mouse` should print `mouse on`.
+- Make sure your terminal emulator itself supports and isn't blocking mouse
+  reporting (this is virtually always on by default in modern terminals).
+- As a full workaround, the desktop is also completely usable from the
+  keyboard: `Tab`/`Shift+Tab`/arrow keys to select an icon, `Enter` to open it.
+- Pass `--no-mouse-setup` if you manage the `mouse` tmux option yourself and
+  don't want this program to touch it.
+
+**An icon opens a window that immediately disappears again.**
+A tmux window closes itself the instant its command exits. If the program
+an icon tries to run isn't installed (e.g. `htop`/`top` both missing, or no
+editor available), the window can flash open and vanish within
+milliseconds, which looks just like the click did nothing. The bundled
+default icons already fall back through a few common alternatives and print
+a clear message instead of silently vanishing if none of them are
+available (see the icon fields below) — if you see this with a custom icon
+you added yourself, wrap its `command` in a similar
+`sh -c '<program> || (echo not found; read x)'` pattern so the window stays
+open to show what went wrong.
+
+**`tmux new -s desktop rust-desktop` exits immediately / does nothing.**
+This almost always means the `rust-desktop` binary isn't on your `$PATH` —
+tmux can't find it, fails to launch it, and the session closes again before
+you even see anything. Either use the actual path to the binary
+(`tmux new -s desktop ./target/release/rust-desktop`) or install it onto
+your `$PATH` first with `cargo install --path .` as shown above.
 
 ## Keyboard shortcuts
 
@@ -169,6 +222,14 @@ if so, it just switches there instead of opening another window. Useful for
 programs you only ever want a single instance of anyway (process monitor,
 possibly a file manager). If the field is missing in an older `icons.json`,
 it's automatically treated as `false`.
+
+The bundled default icons wrap their `command` in a `sh -c '<program> ||
+<alternative> || (echo ...; read x)'` fallback chain (see
+`default_icons()` in `src/config.rs`), so that if none of the preferred
+programs are installed, the tmux window stays open with a clear message
+instead of flashing open and closing again instantly (see "Troubleshooting"
+above). Custom icons you add yourself don't get this automatically — if you
+want the same safety net, wrap your own `command` the same way.
 
 ### Time intervals (`settings.json`)
 
