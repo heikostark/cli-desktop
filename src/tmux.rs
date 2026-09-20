@@ -64,17 +64,48 @@ pub fn list_windows(session: &str) -> Result<Vec<TmuxWindow>> {
     Ok(windows)
 }
 
+/// Compute the lowest non-negative window index in `session` that is
+/// currently free, by asking tmux for the windows that actually exist
+/// right now (rather than trusting tmux's own implicit "next index"
+/// selection, which is what we fall back to below after a conflict).
+fn next_free_index(session: &str) -> Result<u32> {
+    let used: std::collections::HashSet<u32> =
+        list_windows(session)?.into_iter().map(|w| w.index).collect();
+    let mut idx = 0;
+    while used.contains(&idx) {
+        idx += 1;
+    }
+    Ok(idx)
+}
+
 /// Open a new window with the given name + command and switch to it immediately.
+///
+/// If tmux reports the target index as already in use (`create window
+/// failed: index N in use` — this can happen if another window was created
+/// concurrently, e.g. from a second rust-desktop instance running in the
+/// same session, or via tmux's own `Ctrl-b c` binding, right between us
+/// listing windows and creating one), this retries a couple of times with
+/// an index we compute ourselves from a fresh `list-windows`, instead of
+/// surfacing a raw tmux error for what is essentially a transient race.
 pub fn new_window(session: &str, name: &str, command: &str) -> Result<()> {
-    run_tmux(&[
-        "new-window",
-        "-t",
-        session,
-        "-n",
-        name,
-        command,
-    ])?;
-    Ok(())
+    match run_tmux(&["new-window", "-t", session, "-n", name, command]) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("index") && e.to_string().contains("in use") => {
+            for _ in 0..5 {
+                let idx = next_free_index(session)?;
+                let target = format!("{}:{}", session, idx);
+                match run_tmux(&["new-window", "-t", &target, "-n", name, command]) {
+                    Ok(_) => return Ok(()),
+                    Err(e2) if e2.to_string().contains("index") && e2.to_string().contains("in use") => {
+                        continue; // another race, try again with a freshly computed index
+                    }
+                    Err(e2) => return Err(e2),
+                }
+            }
+            Err(e)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Switch to a specific window (by index).
@@ -97,6 +128,46 @@ pub fn own_window_index() -> Option<u32> {
     std::env::var("TMUX_PANE").ok()?;
     let raw = run_tmux(&["display-message", "-p", "#{window_index}"]).ok()?;
     raw.parse().ok()
+}
+
+/// The `$TERM` value of the *attached client's* outer terminal — i.e. the
+/// real terminal tmux itself is running in (a GUI emulator, or the raw
+/// Linux console), as opposed to the pane's own `$TERM`.
+///
+/// This distinction matters a lot: tmux always overrides `$TERM` *inside*
+/// a pane to one of its own terminfo entries (typically `tmux-256color` or
+/// `screen-256color`), completely independent of what the outer terminal
+/// actually is. Checking the pane's own `$TERM` can therefore never tell
+/// us whether we're really on the bare Linux console or in a full GUI
+/// terminal emulator — both look identical from inside a pane. tmux does,
+/// however, track the outer client's original `$TERM` and exposes it via
+/// the `client_termname` format variable, which is what this reads.
+pub fn client_termname() -> Option<String> {
+    let raw = run_tmux(&["display-message", "-p", "#{client_termname}"]).ok()?;
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
+/// The device path of the attached client's outer terminal, e.g.
+/// `/dev/pts/3` for anything running under a pseudo-terminal (every
+/// terminal emulator, every SSH session, `script`, ...) or `/dev/tty2` /
+/// `/dev/console` for a genuine Linux virtual console.
+///
+/// This is a second, independent signal for the same tty-vs-emulator
+/// question `client_termname` answers, and a more reliable one in some
+/// ways: it doesn't depend on `$TERM` being set to any particular string
+/// (which can vary across distros/configurations), just on which kind of
+/// device file the client is actually attached to — that's unambiguous.
+pub fn client_tty() -> Option<String> {
+    let raw = run_tmux(&["display-message", "-p", "#{client_tty}"]).ok()?;
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
 }
 
 /// Read whether tmux's own `mouse` option is currently on.

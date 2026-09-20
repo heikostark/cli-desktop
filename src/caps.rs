@@ -6,7 +6,15 @@
 //! and often only 16 colors, whereas terminal emulators such as Alacritty,
 //! kitty, iTerm2, GNOME Terminal, Windows Terminal, etc. usually render
 //! truecolor, full Unicode, and emoji cleanly.
+//!
+//! Crucially, this can *not* simply check the pane's own `$TERM`: tmux
+//! always overrides that to one of its own terminfo entries (typically
+//! `tmux-256color`), regardless of what the real outer terminal is — the
+//! bare Linux console and a full GUI terminal emulator look identical from
+//! inside a pane's own `$TERM`. See `tmux::client_termname()` for the
+//! actual outer-terminal value this uses instead.
 
+use crate::tmux;
 use std::env;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,11 +37,53 @@ pub struct Capabilities {
     /// Colored, multi-part emoji glyphs are probably rendered cleanly.
     pub emoji: bool,
     pub color: ColorSupport,
+    /// The raw values detection was based on, kept around purely so `i`
+    /// can show *why* a given call was made — makes it possible to tell
+    /// whether an unexpected result is because tmux reported something
+    /// this program doesn't recognize, or a genuine bug elsewhere.
+    pub debug_outer_term: String,
+    pub debug_client_tty: String,
+}
+
+fn is_console_term_name(term: &str) -> bool {
+    // The Linux framebuffer console (real tty, no emulator) practically
+    // always reports itself as TERM=linux (or "linux-16color" etc.).
+    // GNU Hurd uses "hurd", some BSD consoles use "cons25".
+    term == "linux" || term.starts_with("linux-") || term == "hurd" || term == "cons25"
+}
+
+/// Whether a tty device path refers to a genuine Linux virtual console
+/// rather than a pseudo-terminal. Every terminal emulator, every SSH
+/// session, `screen`/`tmux` itself, `script`, etc. attaches through a
+/// pseudo-terminal (`/dev/pts/N`); only a real virtual console shows up as
+/// `/dev/ttyN` (a plain number, not e.g. `/dev/ttyUSB0` or `/dev/ttyS0`,
+/// which are serial ports) or `/dev/console`. This doesn't depend on
+/// `$TERM` being set to any particular string at all, which makes it a
+/// good second, independent signal alongside `is_console_term_name`.
+fn is_console_tty_device(path: &str) -> bool {
+    if path == "/dev/console" {
+        return true;
+    }
+    for prefix in ["/dev/tty", "/dev/vc/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl Capabilities {
     pub fn detect() -> Self {
-        let term = env::var("TERM").unwrap_or_default();
+        // The *outer* terminal's $TERM, as tmux saw it when the client
+        // attached — this is what actually tells us whether the real
+        // terminal is the bare console or a GUI emulator. Falls back to
+        // this process's own (tmux-overridden) $TERM if that can't be
+        // determined for some reason (e.g. not actually running under
+        // tmux yet, such as during very early manual testing).
+        let outer_term = tmux::client_termname().unwrap_or_else(|| env::var("TERM").unwrap_or_default());
+        let client_tty = tmux::client_tty().unwrap_or_default();
         let colorterm = env::var("COLORTERM").unwrap_or_default();
         let lang = env::var("LC_ALL")
             .or_else(|_| env::var("LC_CTYPE"))
@@ -41,13 +91,12 @@ impl Capabilities {
             .unwrap_or_default()
             .to_lowercase();
 
-        // The Linux framebuffer console (real tty, no emulator) practically
-        // always reports itself as TERM=linux (or "linux-16color" etc.).
-        // GNU Hurd uses "hurd", some BSD consoles use "cons25".
-        let is_console_tty = term == "linux"
-            || term.starts_with("linux-")
-            || term == "hurd"
-            || term == "cons25";
+        // Two independent signals, either one being true is enough: the
+        // outer $TERM naming convention, and (more reliably, since it
+        // doesn't depend on $TERM at all) the actual device path of the
+        // attached client's terminal.
+        let is_console_tty =
+            is_console_term_name(&outer_term) || is_console_tty_device(&client_tty);
 
         let unicode = lang.contains("utf-8") || lang.contains("utf8");
 
@@ -62,13 +111,20 @@ impl Capabilities {
             ColorSupport::Basic16
         } else if colorterm.eq_ignore_ascii_case("truecolor") || colorterm.eq_ignore_ascii_case("24bit") {
             ColorSupport::TrueColor
-        } else if term.contains("256color") {
+        } else if outer_term.contains("256color") {
             ColorSupport::Ansi256
         } else {
             ColorSupport::Basic16
         };
 
-        Self { is_console_tty, unicode, emoji, color }
+        Self {
+            is_console_tty,
+            unicode,
+            emoji,
+            color,
+            debug_outer_term: outer_term,
+            debug_client_tty: client_tty,
+        }
     }
 
     /// Can be overridden manually via CLI flag for testing/debugging.
@@ -95,7 +151,10 @@ impl Capabilities {
         };
         let charset = if self.unicode { "Unicode" } else { "ASCII" };
         let emoji = if self.emoji { "emoji on" } else { "emoji off" };
-        format!("{} · {} · {} · {}", env_kind, color, charset, emoji)
+        format!(
+            "{} · {} · {} · {} (term={:?} tty={:?})",
+            env_kind, color, charset, emoji, self.debug_outer_term, self.debug_client_tty
+        )
     }
 }
 

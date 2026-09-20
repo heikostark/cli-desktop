@@ -53,19 +53,55 @@ and colors accordingly:
 | Terminal emulator, ASCII locale | ASCII ramp | 256 colors/truecolor depending on `COLORTERM`, wallpaper in original colors | ASCII bracket icons |
 | Terminal emulator, UTF-8 locale | extended ramp with block characters (` .:-=+*#░▒▓█`) | 256 colors/truecolor, wallpaper in original colors | Emoji (🖥️ 📝 📁 📊 🗑️) |
 
-Detection logic (see `src/caps.rs`):
-- **tty detection**: `$TERM` is `linux`, `hurd`, or similar → the
-  framebuffer console has no color emoji font, so ASCII icons and only 16
-  colors are used automatically there, regardless of what `COLORTERM` claims.
+Detection logic (see `src/caps.rs`), either signal being true is enough:
+- **Outer `$TERM` name**: as tmux saw it when the attached client
+  connected, via `tmux display-message -p '#{client_termname}'` — checked
+  against `linux`, `hurd`, `cons25` and similar. This deliberately does
+  **not** check the pane's own `$TERM`, since tmux always overrides that to
+  its own terminfo entry (e.g. `tmux-256color`) regardless of the real
+  outer terminal; checking it would never be able to tell a console and a
+  terminal emulator apart.
+- **Outer client's tty device path**: via `tmux display-message -p
+  '#{client_tty}'`. A genuine Linux virtual console shows up as
+  `/dev/ttyN` or `/dev/console`; a terminal emulator, SSH session, `screen`,
+  or anything else always shows up as a pseudo-terminal (`/dev/pts/N`).
+  This doesn't depend on `$TERM` being set to any particular string at
+  all, which makes it a good second, independent signal in case the first
+  one doesn't recognize a given system's `$TERM` value.
+
+  On the console (either signal), ASCII icons and only 16 colors are used
+  automatically, regardless of what `COLORTERM` claims — and, separately,
+  mouse support is generally unavailable there at all (see
+  "Troubleshooting").
 - **Unicode/emoji**: based on `$LC_ALL`/`$LC_CTYPE`/`$LANG` (needs a UTF-8
   locale) and only outside the tty console.
 - **Color depth**: `COLORTERM=truecolor`/`24bit` → 24-bit RGB,
-  `TERM=*256color*` → 256-color palette (nearest color is computed),
-  otherwise 16 colors.
+  outer `$TERM` containing `256color` → 256-color palette (nearest color is
+  computed), otherwise 16 colors.
+
+Press `i` to see not just the result but the *raw* values detection was
+based on (`term=... tty=...`) — handy for figuring out why a given system
+wasn't recognized as expected. If it's still wrong for your setup for any
+reason, `--force-tty` sidesteps all of this detection entirely.
 
 The default icons (Terminal/Editor/Files/Processes) are created on the
 very first run to match the detected environment (emoji or ASCII brackets)
 and then saved to `~/.config/cli-desktop/icons.json`.
+
+**Reusing the same config across environments:** `icons.json` stores
+whatever glyph was chosen on first run (e.g. an emoji), and that file is
+then reused as-is on later runs — including in a *different* environment,
+such as switching from a terminal emulator to the raw tty console. Since
+the tty console typically can't render emoji at all (no color-emoji font,
+and the glyph is often missing from the console font entirely), the
+program does **not** blindly draw whatever is stored in `icons.json`:
+every icon's glyph is re-evaluated against the *current* run's detected
+capabilities before drawing. If the current environment can't do emoji but
+a stored glyph isn't plain ASCII, it's displayed (and, importantly, its
+click hit-box is sized) as `[X]` instead, `X` being the icon name's first
+letter — so an icon is never invisible or unclickable just because it was
+last configured somewhere else. `icons.json` itself is left untouched, so
+switching back to a terminal emulator later still shows the original emoji.
 
 Pressing **`i`** shows the detected environment in the status line at any
 time. For testing, detection can be overridden via `--force-tty` (forces
@@ -157,6 +193,62 @@ you even see anything. Either use the actual path to the binary
 (`tmux new -s desktop ./target/release/rust-desktop`) or install it onto
 your `$PATH` first with `cargo install --path .` as shown above.
 
+**On the raw Linux console (tty): icons aren't shown / are marked with "?" / can't be clicked or dragged, and the mouse only selects background text.**
+This has two separate causes, both specific to the bare console (a real
+terminal emulator doesn't have either problem):
+
+1. *Detecting the console at all.* tmux always overrides `$TERM` **inside**
+   a pane to one of its own terminfo entries (typically `tmux-256color`),
+   regardless of what the real outer terminal is — so simply checking the
+   pane's own `$TERM` can never tell console and terminal-emulator apart;
+   both look identical from inside a pane. This version instead asks tmux
+   for two things about the *attached client's* real outer terminal: its
+   original terminal type (`#{client_termname}`) and the device path it's
+   actually attached to (`#{client_tty}`, which is `/dev/ttyN` on a real
+   console vs. `/dev/pts/N` for literally anything else, regardless of
+   `$TERM`) — either one being recognized is enough. Press `i` to see not
+   just the result but the raw values this was based on
+   (`term=... tty=...`), which is the fastest way to tell whether tmux is
+   reporting something this program doesn't recognize (in which case,
+   please report the exact values shown) versus something else being wrong.
+   **If detection is wrong for any reason, `--force-tty` sidesteps it
+   completely** and is guaranteed to switch on the console-safe rendering
+   (ASCII icons, 16 colors) and keyboard-first controls described below —
+   worth trying immediately if you're not sure what's going on. A `[?]` on
+   an icon specifically means the *opposite* problem — emoji support was
+   detected but the icon's name doesn't start with a recognizable ASCII
+   letter to fall back to; this doesn't affect clickability.
+2. *Mouse input on the console itself.* Even with correct detection, the
+   bare Linux console generally has **no support at all** for the
+   xterm/SGR mouse-reporting protocol this program (and most other
+   mouse-driven terminal programs) relies on — that protocol is a feature
+   terminal emulators implement, not the kernel's own framebuffer console
+   driver. Getting a mouse to do anything on the console at all normally
+   requires the `gpm` daemon running with a configuration that emulates
+   this protocol, which isn't something this program can set up or detect,
+   and isn't present on most systems by default. Without it, dragging with
+   the mouse just falls back to the console's own plain text selection —
+   exactly the "only the background gets selected" behavior described
+   above. **This is why the program leads with keyboard controls whenever
+   it detects the console**: the first icon is already selected on
+   startup, and every mouse action has a keyboard equivalent —
+   `Tab`/`Shift+Tab`/arrow keys to select, `Enter` to open, and
+   `Shift+arrow keys` to move the selected icon (the equivalent of
+   dragging it). None of this needs a working mouse.
+
+**`tmux` reports `create window failed: index N in use` when opening an icon.**
+This is a tmux-level race over which window index to use next, most likely
+because more than one thing is creating tmux windows in the same session
+around the same time — commonly a second rust-desktop instance running
+somewhere else in that session (see the warning below), or tmux's own
+`Ctrl-b c` binding firing at the same moment. `new_window` in `src/tmux.rs`
+already retries automatically with a freshly computed free index if this
+happens, so a single occurrence should just work transparently; if it
+persists, check whether you have more than one rust-desktop instance
+running in this session (`tmux list-windows`, or watch for the "another
+rust-desktop instance seems to already be running" warning shown at
+startup and in the status line).
+
 ## Keyboard shortcuts
 
 | Key | Action |
@@ -164,6 +256,7 @@ your `$PATH` first with `cargo install --path .` as shown above.
 | `q` / `Esc` | quit the desktop (instead cancels an open confirmation, if any) |
 | `Tab` / `↓` `→` | select the next icon |
 | `Shift+Tab` / `↑` `←` | select the previous icon |
+| `Shift+↑↓←→` | move the selected icon (keyboard equivalent of dragging it) |
 | `Enter` | open the selected icon |
 | `j` / `y` | accept a pending confirmation (delete icon / empty trash) |
 | `n` / `Esc` | cancel a pending confirmation |
@@ -184,6 +277,7 @@ Settings live under `~/.config/cli-desktop/`, each part in its **own file**:
 | `~/.config/cli-desktop/wallpaper.json` | path to the background image (`{"path": "..."}` or `{"path": null}`) |
 | `~/.config/cli-desktop/settings.json` | time intervals (taskbar polling, clock, full redraw) |
 | `~/.config/cli-desktop/colors.json` | UI color scheme |
+| `~/.config/cli-desktop/instance.lock` | pid/session/window of the currently running instance (see "Troubleshooting") |
 
 Each file is only written when the relevant part actually changes (e.g.
 double-clicking an icon only touches `icons.json`, emptying the trash only

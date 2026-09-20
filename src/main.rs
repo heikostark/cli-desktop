@@ -6,7 +6,8 @@ mod tmux;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+    MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -55,6 +56,7 @@ fn print_help_and_exit() {
          -h, --help                Show this help\n\n\
          Keys while running:\n  \
          Tab / Shift+Tab or arrow keys       switch icon selection\n  \
+         Shift + arrow keys                  move the selected icon\n  \
          Enter                               open the selected icon\n  \
          q / Esc                             quit\n  \
          r                                   refresh the taskbar\n  \
@@ -147,6 +149,16 @@ fn main() -> Result<()> {
     let (cols, rows) = terminal::size()?;
     let mut desktop = Desktop::new(cfg, cols, rows, wallpaper_arg, capabilities)?;
 
+    // Warn (without blocking) if another rust-desktop instance already
+    // seems to be running in this same tmux session — this is a common
+    // source of confusion, and can trigger tmux errors like `create window
+    // failed: index N in use` if both instances happen to open a window at
+    // nearly the same moment.
+    if let Some(warning) = config::check_and_write_instance_lock(&desktop.session, desktop.own_window) {
+        eprintln!("Warning: {}", warning);
+        desktop.status = format!("Warning: {}", warning);
+    }
+
     // Clean shutdown on SIGTERM/SIGHUP (e.g. `tmux kill-session`, system
     // shutdown): instead of killing the process abruptly (which would leave
     // the terminal in alternate-screen/raw mode), this just sets a flag that
@@ -225,18 +237,30 @@ fn main() -> Result<()> {
                     continue;
                 }
 
-                match k.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Tab | KeyCode::Down | KeyCode::Right => desktop.select_next(),
-                    KeyCode::BackTab | KeyCode::Up | KeyCode::Left => desktop.select_prev(),
-                    KeyCode::Enter => desktop.open_selected(),
-                    KeyCode::Char('r') => {
+                let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+                match (shift, k.code) {
+                    (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => break,
+                    (false, KeyCode::Tab) | (false, KeyCode::Down) | (false, KeyCode::Right) => {
+                        desktop.select_next()
+                    }
+                    (false, KeyCode::BackTab) | (false, KeyCode::Up) | (false, KeyCode::Left) => {
+                        desktop.select_prev()
+                    }
+                    // Shift+arrows: move the selected icon (keyboard
+                    // equivalent of drag-and-drop, since mouse dragging
+                    // generally doesn't work on the raw Linux console).
+                    (true, KeyCode::Up) => desktop.move_selected(0, -1),
+                    (true, KeyCode::Down) => desktop.move_selected(0, 1),
+                    (true, KeyCode::Left) => desktop.move_selected(-1, 0),
+                    (true, KeyCode::Right) => desktop.move_selected(1, 0),
+                    (_, KeyCode::Enter) => desktop.open_selected(),
+                    (_, KeyCode::Char('r')) => {
                         desktop.refresh_windows();
                         desktop.status = "Taskbar refreshed.".into();
                     }
-                    KeyCode::Char('e') => desktop.request_empty_trash(),
-                    KeyCode::Char('u') => desktop.restore_last_trash(),
-                    KeyCode::Char('i') => desktop.show_system_info(),
+                    (_, KeyCode::Char('e')) => desktop.request_empty_trash(),
+                    (_, KeyCode::Char('u')) => desktop.restore_last_trash(),
+                    (_, KeyCode::Char('i')) => desktop.show_system_info(),
                     _ => {}
                 }
                 desktop.render(&mut out)?;
@@ -330,5 +354,6 @@ fn main() -> Result<()> {
     }
 
     let _ = out.flush();
+    config::clear_instance_lock();
     Ok(())
 }

@@ -74,10 +74,26 @@ impl Desktop {
             &caps,
         );
         let windows = tmux::list_windows(&session).unwrap_or_default();
-        let status = format!(
-            "{} · 'i' = system info · q = quit",
-            "Double-click = open · Drag = move · drag onto trash = delete"
-        );
+        // On the raw Linux console, xterm-style mouse reporting generally
+        // doesn't work at all (it needs gpm with specific configuration,
+        // which we have no way to set up or detect) — so default straight
+        // into keyboard mode: pre-select the first icon, and lead with the
+        // keyboard controls instead of the mouse-centric message.
+        let (status, selected_icon) = if caps.is_console_tty {
+            (
+                "Mouse may not work on a console: Tab/arrows = select · Enter = open · \
+                 Shift+arrows = move · 'i' = system info · q = quit"
+                    .to_string(),
+                if cfg.icons.is_empty() { None } else { Some(0) },
+            )
+        } else {
+            (
+                "Double-click = open · Drag = move · drag onto trash = delete · \
+                 'i' = system info · q = quit"
+                    .to_string(),
+                None,
+            )
+        };
 
         Ok(Self {
             cfg,
@@ -88,7 +104,7 @@ impl Desktop {
             rows,
             wallpaper,
             windows,
-            selected_icon: None,
+            selected_icon,
             dragging: None,
             last_click: None,
             status,
@@ -193,7 +209,7 @@ impl Desktop {
                 _ if self.selected_icon == Some(i) => IconStyle::Selected,
                 _ => IconStyle::Normal,
             };
-            draw_icon(out, icon, style, &palette)?;
+            draw_icon(out, icon, style, &palette, &self.caps)?;
         }
 
         // 3) Trash (emoji if available, otherwise ASCII brackets; a
@@ -224,7 +240,7 @@ impl Desktop {
         } else {
             IconStyle::Full
         };
-        draw_icon(out, &trash_icon, trash_style, &palette)?;
+        draw_icon(out, &trash_icon, trash_style, &palette, &self.caps)?;
 
         // 4) Taskbar at the bottom
         self.taskbar_boxes.clear();
@@ -295,7 +311,7 @@ impl Desktop {
     // ---- Hit testing ----
 
     pub fn icon_at(&self, x: u16, y: u16) -> Option<usize> {
-        self.cfg.icons.iter().position(|icon| hit_icon(icon, x, y))
+        self.cfg.icons.iter().position(|icon| hit_icon(icon, x, y, &self.caps))
     }
 
     pub fn trash_hit(&self, x: u16, y: u16) -> bool {
@@ -345,6 +361,28 @@ impl Desktop {
         if let Some(idx) = self.selected_icon {
             self.launch_icon(idx);
         }
+    }
+
+    /// Move the currently selected icon by one grid step in the given
+    /// direction (Shift+arrow keys), then snap/resolve collisions exactly
+    /// like a mouse drag-and-drop would. This is the keyboard equivalent of
+    /// dragging an icon, needed because mouse dragging generally doesn't
+    /// work at all on the raw Linux console (no gpm / xterm mouse protocol
+    /// support there).
+    pub fn move_selected(&mut self, dx: i32, dy: i32) {
+        let Some(idx) = self.selected_icon else {
+            self.status = "No icon selected — press Tab first.".into();
+            return;
+        };
+        let Some(icon) = self.cfg.icons.get(idx) else { return };
+        let nx = icon.x as i32 + dx * GRID_W as i32;
+        let ny = icon.y as i32 + dy * GRID_H as i32;
+        let (cx, cy) = self.clamp_icon_pos(nx, ny);
+        if let Some(icon) = self.cfg.icons.get_mut(idx) {
+            icon.x = cx;
+            icon.y = cy;
+        }
+        self.snap_and_resolve(idx);
     }
 
     // ---- Confirmation dialogs ----
@@ -495,13 +533,13 @@ impl Desktop {
         // column, then jump to the next column. Bounded search (max 80
         // attempts) so this can never get stuck.
         for _ in 0..80 {
-            let rect = icon_rect(&self.cfg.icons[idx]);
+            let rect = icon_rect(&self.cfg.icons[idx], &self.caps);
             let collides = self
                 .cfg
                 .icons
                 .iter()
                 .enumerate()
-                .any(|(j, other)| j != idx && rects_overlap(rect, icon_rect(other)));
+                .any(|(j, other)| j != idx && rects_overlap(rect, icon_rect(other, &self.caps)));
             if !collides {
                 break;
             }
@@ -528,18 +566,51 @@ impl Desktop {
     }
 }
 
-fn hit_icon(icon: &Icon, x: u16, y: u16) -> bool {
+/// The glyph actually used for display and hit-testing, adapted to the
+/// *current* run's capabilities.
+///
+/// `icons.json` stores one fixed glyph per icon (e.g. "🖥️"), which is only
+/// chosen based on capabilities the first time the file is created. If the
+/// same config is later reused on a different terminal that can't render
+/// emoji (most notably the raw Linux console/tty, which typically has no
+/// color-emoji font and is missing the glyph entirely), rendering that
+/// stored glyph verbatim would draw something invisible/garbled — and,
+/// worse, `unicode-width`'s assumed column width (e.g. 2 columns for many
+/// emoji) would no longer match how many columns the terminal actually
+/// advanced the cursor by, silently shifting every click hit-box out of
+/// alignment. Both symptoms ("icon not visible" and "icon not clickable")
+/// stem from this same mismatch. Falling back to a plain ASCII glyph
+/// whenever the current environment can't do emoji — regardless of what's
+/// stored in the config file — keeps what's drawn and what's clickable
+/// consistent, and keeps the fallback human-readable (first letter of the
+/// icon's name) instead of raw bytes.
+fn effective_glyph<'a>(icon: &'a Icon, caps: &Capabilities) -> std::borrow::Cow<'a, str> {
+    if caps.emoji || icon.glyph.is_ascii() {
+        return std::borrow::Cow::Borrowed(&icon.glyph);
+    }
+    let letter = icon
+        .name
+        .chars()
+        .find(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or('?');
+    std::borrow::Cow::Owned(format!("[{}]", letter))
+}
+
+fn hit_icon(icon: &Icon, x: u16, y: u16, caps: &Capabilities) -> bool {
     // An icon occupies: the glyph line + the label line below it, width =
     // max(glyph, label) + 2 (unicode-width instead of char count, since
     // emoji often take up 2 terminal columns).
-    let w = icon.glyph.width().max(icon.name.width()) as u16 + 2;
+    let glyph = effective_glyph(icon, caps);
+    let w = glyph.width().max(icon.name.width()) as u16 + 2;
     x >= icon.x && x < icon.x + w && y >= icon.y && y <= icon.y + 1
 }
 
 /// The rectangle an icon occupies on screen (x, y, width, height) – used
 /// for collision detection during snap-to-grid.
-fn icon_rect(icon: &Icon) -> (u16, u16, u16, u16) {
-    let w = icon.glyph.width().max(icon.name.width()) as u16 + 1;
+fn icon_rect(icon: &Icon, caps: &Capabilities) -> (u16, u16, u16, u16) {
+    let glyph = effective_glyph(icon, caps);
+    let w = glyph.width().max(icon.name.width()) as u16 + 1;
     (icon.x, icon.y, w.max(3), 2)
 }
 
@@ -571,20 +642,21 @@ struct IconPalette {
     full_fg: Color,
 }
 
-fn draw_icon(out: &mut impl Write, icon: &Icon, style: IconStyle, palette: &IconPalette) -> Result<()> {
+fn draw_icon(out: &mut impl Write, icon: &Icon, style: IconStyle, palette: &IconPalette, caps: &Capabilities) -> Result<()> {
     let (fg, bg) = match style {
         IconStyle::Normal => (palette.normal_fg, None),
         IconStyle::Selected => (palette.selected_fg, Some(palette.selected_bg)),
         IconStyle::PendingDelete => (palette.danger_fg, Some(palette.danger_bg)),
         IconStyle::Full => (palette.full_fg, None),
     };
+    let glyph = effective_glyph(icon, caps);
 
     queue!(out, cursor::MoveTo(icon.x, icon.y))?;
     queue!(out, SetForegroundColor(fg))?;
     if let Some(bg) = bg {
         queue!(out, SetBackgroundColor(bg))?;
     }
-    out.write_all(icon.glyph.as_bytes())?;
+    out.write_all(glyph.as_bytes())?;
     queue!(out, ResetColor)?;
 
     let label_fg = match style {

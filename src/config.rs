@@ -223,6 +223,69 @@ fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstanceLock {
+    pid: u32,
+    session: String,
+    window: Option<u32>,
+}
+
+fn lock_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("instance.lock"))
+}
+
+/// Check whether another rust-desktop instance already seems to be running
+/// in the same tmux session, then record ourselves as the current instance.
+///
+/// This doesn't block startup — running a second instance still works —
+/// but it's a common source of confusion (and can trigger tmux errors like
+/// `create window failed: index N in use` if both instances try to open a
+/// window at nearly the same moment), so we warn about it clearly instead
+/// of leaving the user to guess. The check is best-effort: if a previous
+/// instance was killed with SIGKILL (which can't be caught to clean up
+/// after itself) its lock file would otherwise linger forever, so a stale
+/// lock is recognized by checking whether that pid is still alive via
+/// `/proc/<pid>` and silently ignored/overwritten if not.
+pub fn check_and_write_instance_lock(session: &str, window: Option<u32>) -> Option<String> {
+    let path = lock_path().ok()?;
+    let warning = read_json::<InstanceLock>(&path).ok().flatten().and_then(|prev| {
+        let alive = std::path::Path::new(&format!("/proc/{}", prev.pid)).exists();
+        if alive && prev.session == session {
+            let win = prev
+                .window
+                .map(|w| w.to_string())
+                .unwrap_or_else(|| "?".into());
+            Some(format!(
+                "another rust-desktop instance seems to already be running in this session \
+                 (window {win}, pid {pid}). Running two instances that share the same \
+                 configuration can interfere with each other (e.g. tmux 'index in use' errors, \
+                 or icons.json being written by both at once) — consider switching to window \
+                 {win} instead.",
+                win = win,
+                pid = prev.pid
+            ))
+        } else {
+            None
+        }
+    });
+
+    let mine = InstanceLock {
+        pid: std::process::id(),
+        session: session.to_string(),
+        window,
+    };
+    let _ = write_json(&path, &mine);
+    warning
+}
+
+/// Remove our own instance lock on clean shutdown, so a later run doesn't
+/// have to rely on the `/proc/<pid>` staleness check at all.
+pub fn clear_instance_lock() {
+    if let Ok(path) = lock_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 impl DesktopConfig {
     /// Loads every config file individually. If a file is missing, a
     /// sensible default is generated for that part and immediately written
