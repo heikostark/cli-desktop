@@ -7,7 +7,7 @@ image) is operated with the mouse in plain text mode.
 ## How it works
 
 - This process itself runs in **one** tmux window and draws the "desktop
-  surface" there (wallpaper, icons, taskbar, trash). On startup it also
+  surface" there (wallpaper, icons, taskbar, trash). On startup, it also
   automatically runs `tmux set-option -g mouse on` if it's currently off,
   since tmux otherwise won't forward mouse clicks from your real terminal
   into the pane at all (see "Troubleshooting" below; pass `--no-mouse-setup`
@@ -23,7 +23,7 @@ image) is operated with the mouse in plain text mode.
   the icon automatically snaps to an invisible grid and steps around other
   icons instead of overlapping them (snap-to-grid).
 - **Keyboard control for icons**: `Tab`/arrow down/right selects the next
-  icon, `Shift+Tab`/arrow up/left the previous one, `Enter` opens the
+  icon, `Shift+Tab`/arrow up/left selects the previous one, `Enter` opens the
   selected icon – fully usable without a mouse.
 - **Deleting**: drag an icon onto the trash (happens immediately, since
   it's a deliberate drag gesture), or right-click an icon (asks for
@@ -36,21 +36,21 @@ image) is operated with the mouse in plain text mode.
   switches there instead of opening another window.
 - A small **clock** runs in the top right corner.
 - The **background image** is loaded via the `image` crate at startup,
-  rasterized into brightness values, and translated into a character ramp –
+  rasterised into brightness values, and translated into a character ramp –
   fitted exactly to the current terminal size. Without an image, a quiet
   procedural pattern is drawn as a fallback.
 
 ## Automatic detection: tty vs. terminal emulator
 
-At startup the program checks whether it's running on a raw Linux
+At startup, the program checks whether it's running on a raw Linux
 framebuffer console (`TERM=linux`, i.e. e.g. `Ctrl+Alt+F2` without
 X11/Wayland) or inside a terminal emulator, and adjusts the character set
-and colors accordingly:
+and colours accordingly:
 
 | Environment | Character set | Colors | Icons |
 |---|---|---|---|
 | Linux console (tty) | plain ASCII ramp (` .:-=+*#%@`) | 16 standard colors, monochrome gray wallpaper | `[T]`, `[E]`, `[D]`, `[P]`, `[ ]`/`[#]` |
-| Terminal emulator, ASCII locale | ASCII ramp | 256 colors/truecolor depending on `COLORTERM`, wallpaper in original colors | ASCII bracket icons |
+| Terminal emulator, ASCII locale | ASCII ramp | 256 colors/truecolor depending on `COLORTERM`, wallpaper in original colours | ASCII bracket icons |
 | Terminal emulator, UTF-8 locale | extended ramp with block characters (` .:-=+*#░▒▓█`) | 256 colors/truecolor, wallpaper in original colors | Emoji (🖥️ 📝 📁 📊 🗑️) |
 
 Detection logic (see `src/caps.rs`), either signal being true is enough:
@@ -67,9 +67,9 @@ Detection logic (see `src/caps.rs`), either signal being true is enough:
   or anything else always shows up as a pseudo-terminal (`/dev/pts/N`).
   This doesn't depend on `$TERM` being set to any particular string at
   all, which makes it a good second, independent signal in case the first
-  one doesn't recognize a given system's `$TERM` value.
+  one doesn't recognise a given system's `$TERM` value.
 
-  On the console (either signal), ASCII icons and only 16 colors are used
+  On the console (either signal), ASCII icons and only 16 colours are used
   automatically, regardless of what `COLORTERM` claims — and, separately,
   mouse support is generally unavailable there at all (see
   "Troubleshooting").
@@ -77,11 +77,11 @@ Detection logic (see `src/caps.rs`), either signal being true is enough:
   locale) and only outside the tty console.
 - **Color depth**: `COLORTERM=truecolor`/`24bit` → 24-bit RGB,
   outer `$TERM` containing `256color` → 256-color palette (nearest color is
-  computed), otherwise 16 colors.
+  computed), otherwise 16 colours.
 
 Press `i` to see not just the result but the *raw* values detection was
 based on (`term=... tty=...`) — handy for figuring out why a given system
-wasn't recognized as expected. If it's still wrong for your setup for any
+wasn't recognised as expected. If it's still wrong for your setup for any
 reason, `--force-tty` sidesteps all of this detection entirely.
 
 The default icons (Terminal/Editor/Files/Processes) are created on the
@@ -92,7 +92,7 @@ and then saved to `~/.config/cli-desktop/icons.json`.
 whatever glyph was chosen on first run (e.g. an emoji), and that file is
 then reused as-is on later runs — including in a *different* environment,
 such as switching from a terminal emulator to the raw tty console. Since
-the tty console typically can't render emoji at all (no color-emoji font,
+the tty console typically can't render emoji at all (no colour-emoji font,
 and the glyph is often missing from the console font entirely), the
 program does **not** blindly draw whatever is stored in `icons.json`:
 every icon's glyph is re-evaluated against the *current* run's detected
@@ -105,7 +105,7 @@ switching back to a terminal emulator later still shows the original emoji.
 
 Pressing **`i`** shows the detected environment in the status line at any
 time. For testing, detection can be overridden via `--force-tty` (forces
-tty behavior) or `--force-emoji` (forces emoji/Unicode).
+tty behaviour) or `--force-emoji` (forces emoji/Unicode).
 
 ## Build
 
@@ -180,7 +180,7 @@ an icon tries to run isn't installed (e.g. `htop`/`top` both missing, or no
 editor available), the window can flash open and vanish within
 milliseconds, which looks just like the click did nothing. The bundled
 default icons already fall back through a few common alternatives and print
-a clear message instead of silently vanishing if none of them are
+a clear message instead of silently vanishing if none of them is
 available (see the icon fields below) — if you see this with a custom icon
 you added yourself, wrap its `command` in a similar
 `sh -c '<program> || (echo not found; read x)'` pattern so the window stays
@@ -206,17 +206,17 @@ terminal emulator doesn't have either problem):
    original terminal type (`#{client_termname}`) and the device path it's
    actually attached to (`#{client_tty}`, which is `/dev/ttyN` on a real
    console vs. `/dev/pts/N` for literally anything else, regardless of
-   `$TERM`) — either one being recognized is enough. Press `i` to see not
+   `$TERM`) — either one being recognised is enough. Press `i` to see not
    just the result but the raw values this was based on
    (`term=... tty=...`), which is the fastest way to tell whether tmux is
-   reporting something this program doesn't recognize (in which case,
+   reporting something this program doesn't recognise (in which case,
    please report the exact values shown) versus something else being wrong.
    **If detection is wrong for any reason, `--force-tty` sidesteps it
    completely** and is guaranteed to switch on the console-safe rendering
-   (ASCII icons, 16 colors) and keyboard-first controls described below —
+   (ASCII icons, 16 colours) and keyboard-first controls described below —
    worth trying immediately if you're not sure what's going on. A `[?]` on
    an icon specifically means the *opposite* problem — emoji support was
-   detected but the icon's name doesn't start with a recognizable ASCII
+   detected but the icon's name doesn't start with a recognisable ASCII
    letter to fall back to; this doesn't affect clickability.
 2. *Mouse input on the console itself.* Even with correct detection, the
    bare Linux console generally has **no support at all** for the
@@ -228,7 +228,7 @@ terminal emulator doesn't have either problem):
    this protocol, which isn't something this program can set up or detect,
    and isn't present on most systems by default. Without it, dragging with
    the mouse just falls back to the console's own plain text selection —
-   exactly the "only the background gets selected" behavior described
+   exactly the "only the background gets selected" behaviour described
    above. **This is why the program leads with keyboard controls whenever
    it detects the console**: the first icon is already selected on
    startup, and every mouse action has a keyboard equivalent —
@@ -263,7 +263,7 @@ startup and in the status line).
 | `r` | manually refresh the taskbar |
 | `e` | empty the trash (asks for confirmation first) |
 | `u` | restore the last deleted icon |
-| `i` | show the detected environment (tty/terminal, colors, emoji) |
+| `i` | show the detected environment (tty/terminal, colours, emoji) |
 | `-h` / `--help` | brief help (command line, before starting) |
 
 ## Configuration
@@ -344,7 +344,7 @@ want the same safety net, wrap your own `command` the same way.
 Values are only read at startup; changes to the file only take effect after
 restarting the program.
 
-### Color scheme (`colors.json`)
+### Colour scheme (`colors.json`)
 
 ```json
 {
@@ -366,13 +366,13 @@ restarting the program.
 }
 ```
 
-Each value is either a color name (`black`, `red`, `green`, `yellow`,
+Each value is either a colour name (`black`, `red`, `green`, `yellow`,
 `blue`, `magenta`, `cyan`, `white`, `grey`/`gray`, `darkgrey`/`darkgray`, as
 well as `dark` variants of red/green/yellow/blue/magenta/cyan) or a hex
-color `#rrggbb`. Hex colors are automatically converted to match the
-detected terminal capability: truecolor directly, 256-color terminals round
-to the nearest palette color, and a plain tty console (only 16 colors)
-safely falls back to white instead of sending a color it can't display.
+colour `#rrggbb`. Hex colours are automatically converted to match the
+detected terminal capability: truecolor directly, 256-colour terminals round
+to the nearest palette colour, and a plain tty console (only 16 colours)
+safely falls back to white instead of sending a colour it can't display.
 
 ### Robustness
 
@@ -390,7 +390,7 @@ safely falls back to white instead of sending a color it can't display.
 
 An icon's `command` field in `icons.json` is passed **unfiltered** to
 `tmux new-window` and executed there as a shell command. For personal use
-on your own machine this is uncritical – it's ultimately the same trust
+on your own machine, this is uncritical – it's ultimately the same trust
 level as your own shell configuration (`.bashrc` etc.). But if `icons.json`
 is shared, synced (e.g. via a dotfiles repo), or taken from an untrusted
 source, opening a crafted icon will run arbitrary code. `icons.json` should
@@ -403,7 +403,7 @@ unknown source.
 src/
   main.rs        Event loop (keyboard + mouse via crossterm), SIGTERM/SIGHUP handling
   desktop.rs     Rendering (wallpaper, icons, taskbar, trash) + hit testing,
-                 snap-to-grid, confirmation dialogs, theme color resolution
+                 snap-to-grid, confirmation dialogues, theme colour resolution
   tmux.rs        Wrapper around the tmux CLI (list/new/select/kill-window)
   ascii_art.rs   Image → ASCII conversion (image crate) + fallback pattern
   caps.rs        Detection of tty vs. terminal emulator, Unicode/emoji/color depth
@@ -422,7 +422,7 @@ src/
 - **Snap-to-grid**: on release, the icon's position is rounded to a 10×4
   character grid; if it then overlaps another icon, the next free spot is
   searched for row by row (then column by column). With very small
-  terminals or very many icons this search can hit the screen edges;
+  terminals or very many icons, this search can hit the screen edges;
   there's currently no scrolling/multi-page view.
 - **Shutting down via signal**: `SIGTERM`/`SIGHUP` (e.g. from
   `tmux kill-session` or a system shutdown) are caught and lead to an
