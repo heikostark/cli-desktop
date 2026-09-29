@@ -234,7 +234,7 @@ fn lock_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("instance.lock"))
 }
 
-/// Check whether another rust-desktop instance already seems to be running
+/// Check whether another cli-desktop instance already seems to be running
 /// in the same tmux session, then record ourselves as the current instance.
 ///
 /// This doesn't block startup — running a second instance still works —
@@ -256,7 +256,7 @@ pub fn check_and_write_instance_lock(session: &str, window: Option<u32>) -> Opti
                 .map(|w| w.to_string())
                 .unwrap_or_else(|| "?".into());
             Some(format!(
-                "another rust-desktop instance seems to already be running in this session \
+                "another cli-desktop instance seems to already be running in this session \
                  (window {win}, pid {pid}). Running two instances that share the same \
                  configuration can interfere with each other (e.g. tmux 'index in use' errors, \
                  or icons.json being written by both at once) — consider switching to window \

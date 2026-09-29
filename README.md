@@ -1,4 +1,4 @@
-# rust-desktop
+# CLI Desktop
 
 A text-based "desktop" written in Rust. Window switching runs entirely
 through **tmux**; the interface (icons, taskbar, trash, ASCII background
@@ -7,7 +7,7 @@ image) is operated with the mouse in plain text mode.
 ## How it works
 
 - This process itself runs in **one** tmux window and draws the "desktop
-  surface" there (wallpaper, icons, taskbar, trash). On startup, it also
+  surface" there (wallpaper, icons, taskbar, trash). On startup it also
   automatically runs `tmux set-option -g mouse on` if it's currently off,
   since tmux otherwise won't forward mouse clicks from your real terminal
   into the pane at all (see "Troubleshooting" below; pass `--no-mouse-setup`
@@ -23,7 +23,7 @@ image) is operated with the mouse in plain text mode.
   the icon automatically snaps to an invisible grid and steps around other
   icons instead of overlapping them (snap-to-grid).
 - **Keyboard control for icons**: `Tab`/arrow down/right selects the next
-  icon, `Shift+Tab`/arrow up/left selects the previous one, `Enter` opens the
+  icon, `Shift+Tab`/arrow up/left the previous one, `Enter` opens the
   selected icon – fully usable without a mouse.
 - **Deleting**: drag an icon onto the trash (happens immediately, since
   it's a deliberate drag gesture), or right-click an icon (asks for
@@ -36,21 +36,21 @@ image) is operated with the mouse in plain text mode.
   switches there instead of opening another window.
 - A small **clock** runs in the top right corner.
 - The **background image** is loaded via the `image` crate at startup,
-  rasterised into brightness values, and translated into a character ramp –
+  rasterized into brightness values, and translated into a character ramp –
   fitted exactly to the current terminal size. Without an image, a quiet
   procedural pattern is drawn as a fallback.
 
 ## Automatic detection: tty vs. terminal emulator
 
-At startup, the program checks whether it's running on a raw Linux
+At startup the program checks whether it's running on a raw Linux
 framebuffer console (`TERM=linux`, i.e. e.g. `Ctrl+Alt+F2` without
 X11/Wayland) or inside a terminal emulator, and adjusts the character set
-and colours accordingly:
+and colors accordingly:
 
 | Environment | Character set | Colors | Icons |
 |---|---|---|---|
 | Linux console (tty) | plain ASCII ramp (` .:-=+*#%@`) | 16 standard colors, monochrome gray wallpaper | `[T]`, `[E]`, `[D]`, `[P]`, `[ ]`/`[#]` |
-| Terminal emulator, ASCII locale | ASCII ramp | 256 colors/truecolor depending on `COLORTERM`, wallpaper in original colours | ASCII bracket icons |
+| Terminal emulator, ASCII locale | ASCII ramp | 256 colors/truecolor depending on `COLORTERM`, wallpaper in original colors | ASCII bracket icons |
 | Terminal emulator, UTF-8 locale | extended ramp with block characters (` .:-=+*#░▒▓█`) | 256 colors/truecolor, wallpaper in original colors | Emoji (🖥️ 📝 📁 📊 🗑️) |
 
 Detection logic (see `src/caps.rs`), either signal being true is enough:
@@ -67,9 +67,9 @@ Detection logic (see `src/caps.rs`), either signal being true is enough:
   or anything else always shows up as a pseudo-terminal (`/dev/pts/N`).
   This doesn't depend on `$TERM` being set to any particular string at
   all, which makes it a good second, independent signal in case the first
-  one doesn't recognise a given system's `$TERM` value.
+  one doesn't recognize a given system's `$TERM` value.
 
-  On the console (either signal), ASCII icons and only 16 colours are used
+  On the console (either signal), ASCII icons and only 16 colors are used
   automatically, regardless of what `COLORTERM` claims — and, separately,
   mouse support is generally unavailable there at all (see
   "Troubleshooting").
@@ -77,11 +77,11 @@ Detection logic (see `src/caps.rs`), either signal being true is enough:
   locale) and only outside the tty console.
 - **Color depth**: `COLORTERM=truecolor`/`24bit` → 24-bit RGB,
   outer `$TERM` containing `256color` → 256-color palette (nearest color is
-  computed), otherwise 16 colours.
+  computed), otherwise 16 colors.
 
 Press `i` to see not just the result but the *raw* values detection was
 based on (`term=... tty=...`) — handy for figuring out why a given system
-wasn't recognised as expected. If it's still wrong for your setup for any
+wasn't recognized as expected. If it's still wrong for your setup for any
 reason, `--force-tty` sidesteps all of this detection entirely.
 
 The default icons (Terminal/Editor/Files/Processes) are created on the
@@ -92,7 +92,7 @@ and then saved to `~/.config/cli-desktop/icons.json`.
 whatever glyph was chosen on first run (e.g. an emoji), and that file is
 then reused as-is on later runs — including in a *different* environment,
 such as switching from a terminal emulator to the raw tty console. Since
-the tty console typically can't render emoji at all (no colour-emoji font,
+the tty console typically can't render emoji at all (no color-emoji font,
 and the glyph is often missing from the console font entirely), the
 program does **not** blindly draw whatever is stored in `icons.json`:
 every icon's glyph is re-evaluated against the *current* run's detected
@@ -105,7 +105,7 @@ switching back to a terminal emulator later still shows the original emoji.
 
 Pressing **`i`** shows the detected environment in the status line at any
 time. For testing, detection can be overridden via `--force-tty` (forces
-tty behaviour) or `--force-emoji` (forces emoji/Unicode).
+tty behavior) or `--force-emoji` (forces emoji/Unicode).
 
 ## Build
 
@@ -121,36 +121,36 @@ present to run, but isn't compiled in).
 The program **must** run inside a tmux session:
 
 ```bash
-tmux new -s desktop ./target/release/rust-desktop
+tmux new -s desktop ./target/release/cli-desktop
 
 # with a custom background image:
-tmux new -s desktop './target/release/rust-desktop --wallpaper /path/to/image.jpg'
+tmux new -s desktop './target/release/cli-desktop --wallpaper /path/to/image.jpg'
 ```
 
 If you're already inside a tmux session, simply run:
 
 ```bash
-./target/release/rust-desktop
+./target/release/cli-desktop
 ```
 
 Additional options:
 
 ```bash
-./target/release/rust-desktop --help                      # quick overview of all options/keys
-./target/release/rust-desktop --config-dir /path/to/dir    # use a different config directory instead of ~/.config/cli-desktop
-./target/release/rust-desktop --no-mouse-setup             # don't auto-enable tmux's 'mouse' option (see Troubleshooting)
+./target/release/cli-desktop --help                      # quick overview of all options/keys
+./target/release/cli-desktop --config-dir /path/to/dir    # use a different config directory instead of ~/.config/cli-desktop
+./target/release/cli-desktop --no-mouse-setup             # don't auto-enable tmux's 'mouse' option (see Troubleshooting)
 ```
 
 `--config-dir` is handy, for example, for several independent "profiles"
 (different icon sets depending on context) or for testing without touching
 your own configuration.
 
-Optionally, install the binary onto your `$PATH` so a bare `rust-desktop`
+Optionally, install the binary onto your `$PATH` so a bare `cli-desktop`
 works too (this is what `cargo install` does):
 
 ```bash
 cargo install --path .
-tmux new -s desktop rust-desktop
+tmux new -s desktop cli-desktop
 ```
 
 ## Troubleshooting
@@ -161,9 +161,9 @@ into a pane at all — this needs `set -g mouse on` somewhere in tmux's
 configuration. Without it, this program (or any other mouse-driven program
 running inside tmux, e.g. a mouse-enabled vim) simply never receives click
 events; nothing appears broken, clicks just never arrive. To avoid this
-common trap, rust-desktop automatically runs
+common trap, cli-desktop automatically runs
 `tmux set-option -g mouse on` once at startup (you'll see a line about this
-on stderr, e.g. in `tmux new -s desktop -- sh -c './target/release/rust-desktop; read'`
+on stderr, e.g. in `tmux new -s desktop -- sh -c './target/release/cli-desktop; read'`
 if you want to keep the window open to read it). If clicks still don't do
 anything after that:
 - Confirm it actually got turned on: `tmux show-options -g mouse` should print `mouse on`.
@@ -180,17 +180,17 @@ an icon tries to run isn't installed (e.g. `htop`/`top` both missing, or no
 editor available), the window can flash open and vanish within
 milliseconds, which looks just like the click did nothing. The bundled
 default icons already fall back through a few common alternatives and print
-a clear message instead of silently vanishing if none of them is
+a clear message instead of silently vanishing if none of them are
 available (see the icon fields below) — if you see this with a custom icon
 you added yourself, wrap its `command` in a similar
 `sh -c '<program> || (echo not found; read x)'` pattern so the window stays
 open to show what went wrong.
 
-**`tmux new -s desktop rust-desktop` exits immediately / does nothing.**
-This almost always means the `rust-desktop` binary isn't on your `$PATH` —
+**`tmux new -s desktop cli-desktop` exits immediately / does nothing.**
+This almost always means the `cli-desktop` binary isn't on your `$PATH` —
 tmux can't find it, fails to launch it, and the session closes again before
 you even see anything. Either use the actual path to the binary
-(`tmux new -s desktop ./target/release/rust-desktop`) or install it onto
+(`tmux new -s desktop ./target/release/cli-desktop`) or install it onto
 your `$PATH` first with `cargo install --path .` as shown above.
 
 **On the raw Linux console (tty): icons aren't shown / are marked with "?" / can't be clicked or dragged, and the mouse only selects background text.**
@@ -206,17 +206,17 @@ terminal emulator doesn't have either problem):
    original terminal type (`#{client_termname}`) and the device path it's
    actually attached to (`#{client_tty}`, which is `/dev/ttyN` on a real
    console vs. `/dev/pts/N` for literally anything else, regardless of
-   `$TERM`) — either one being recognised is enough. Press `i` to see not
+   `$TERM`) — either one being recognized is enough. Press `i` to see not
    just the result but the raw values this was based on
    (`term=... tty=...`), which is the fastest way to tell whether tmux is
-   reporting something this program doesn't recognise (in which case,
+   reporting something this program doesn't recognize (in which case,
    please report the exact values shown) versus something else being wrong.
    **If detection is wrong for any reason, `--force-tty` sidesteps it
    completely** and is guaranteed to switch on the console-safe rendering
-   (ASCII icons, 16 colours) and keyboard-first controls described below —
+   (ASCII icons, 16 colors) and keyboard-first controls described below —
    worth trying immediately if you're not sure what's going on. A `[?]` on
    an icon specifically means the *opposite* problem — emoji support was
-   detected but the icon's name doesn't start with a recognisable ASCII
+   detected but the icon's name doesn't start with a recognizable ASCII
    letter to fall back to; this doesn't affect clickability.
 2. *Mouse input on the console itself.* Even with correct detection, the
    bare Linux console generally has **no support at all** for the
@@ -228,7 +228,7 @@ terminal emulator doesn't have either problem):
    this protocol, which isn't something this program can set up or detect,
    and isn't present on most systems by default. Without it, dragging with
    the mouse just falls back to the console's own plain text selection —
-   exactly the "only the background gets selected" behaviour described
+   exactly the "only the background gets selected" behavior described
    above. **This is why the program leads with keyboard controls whenever
    it detects the console**: the first icon is already selected on
    startup, and every mouse action has a keyboard equivalent —
@@ -239,14 +239,14 @@ terminal emulator doesn't have either problem):
 **`tmux` reports `create window failed: index N in use` when opening an icon.**
 This is a tmux-level race over which window index to use next, most likely
 because more than one thing is creating tmux windows in the same session
-around the same time — commonly a second rust-desktop instance running
+around the same time — commonly a second cli-desktop instance running
 somewhere else in that session (see the warning below), or tmux's own
 `Ctrl-b c` binding firing at the same moment. `new_window` in `src/tmux.rs`
 already retries automatically with a freshly computed free index if this
 happens, so a single occurrence should just work transparently; if it
-persists, check whether you have more than one rust-desktop instance
+persists, check whether you have more than one cli-desktop instance
 running in this session (`tmux list-windows`, or watch for the "another
-rust-desktop instance seems to already be running" warning shown at
+cli-desktop instance seems to already be running" warning shown at
 startup and in the status line).
 
 ## Keyboard shortcuts
@@ -263,7 +263,7 @@ startup and in the status line).
 | `r` | manually refresh the taskbar |
 | `e` | empty the trash (asks for confirmation first) |
 | `u` | restore the last deleted icon |
-| `i` | show the detected environment (tty/terminal, colours, emoji) |
+| `i` | show the detected environment (tty/terminal, colors, emoji) |
 | `-h` / `--help` | brief help (command line, before starting) |
 
 ## Configuration
@@ -344,7 +344,7 @@ want the same safety net, wrap your own `command` the same way.
 Values are only read at startup; changes to the file only take effect after
 restarting the program.
 
-### Colour scheme (`colors.json`)
+### Color scheme (`colors.json`)
 
 ```json
 {
@@ -366,13 +366,13 @@ restarting the program.
 }
 ```
 
-Each value is either a colour name (`black`, `red`, `green`, `yellow`,
+Each value is either a color name (`black`, `red`, `green`, `yellow`,
 `blue`, `magenta`, `cyan`, `white`, `grey`/`gray`, `darkgrey`/`darkgray`, as
 well as `dark` variants of red/green/yellow/blue/magenta/cyan) or a hex
-colour `#rrggbb`. Hex colours are automatically converted to match the
-detected terminal capability: truecolor directly, 256-colour terminals round
-to the nearest palette colour, and a plain tty console (only 16 colours)
-safely falls back to white instead of sending a colour it can't display.
+color `#rrggbb`. Hex colors are automatically converted to match the
+detected terminal capability: truecolor directly, 256-color terminals round
+to the nearest palette color, and a plain tty console (only 16 colors)
+safely falls back to white instead of sending a color it can't display.
 
 ### Robustness
 
@@ -390,7 +390,7 @@ safely falls back to white instead of sending a colour it can't display.
 
 An icon's `command` field in `icons.json` is passed **unfiltered** to
 `tmux new-window` and executed there as a shell command. For personal use
-on your own machine, this is uncritical – it's ultimately the same trust
+on your own machine this is uncritical – it's ultimately the same trust
 level as your own shell configuration (`.bashrc` etc.). But if `icons.json`
 is shared, synced (e.g. via a dotfiles repo), or taken from an untrusted
 source, opening a crafted icon will run arbitrary code. `icons.json` should
@@ -403,7 +403,7 @@ unknown source.
 src/
   main.rs        Event loop (keyboard + mouse via crossterm), SIGTERM/SIGHUP handling
   desktop.rs     Rendering (wallpaper, icons, taskbar, trash) + hit testing,
-                 snap-to-grid, confirmation dialogues, theme colour resolution
+                 snap-to-grid, confirmation dialogs, theme color resolution
   tmux.rs        Wrapper around the tmux CLI (list/new/select/kill-window)
   ascii_art.rs   Image → ASCII conversion (image crate) + fallback pattern
   caps.rs        Detection of tty vs. terminal emulator, Unicode/emoji/color depth
@@ -422,7 +422,7 @@ src/
 - **Snap-to-grid**: on release, the icon's position is rounded to a 10×4
   character grid; if it then overlaps another icon, the next free spot is
   searched for row by row (then column by column). With very small
-  terminals or very many icons, this search can hit the screen edges;
+  terminals or very many icons this search can hit the screen edges;
   there's currently no scrolling/multi-page view.
 - **Shutting down via signal**: `SIGTERM`/`SIGHUP` (e.g. from
   `tmux kill-session` or a system shutdown) are caught and lead to an

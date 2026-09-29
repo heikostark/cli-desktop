@@ -44,9 +44,9 @@ impl Drop for Term {
 
 fn print_help_and_exit() {
     println!(
-        "rust-desktop – a tmux-based text desktop\n\n\
+        "cli-desktop – a tmux-based text desktop\n\n\
          Usage:\n  \
-         rust-desktop [--wallpaper <image>] [--config-dir <path>] [--force-tty] [--force-emoji] [--no-mouse-setup]\n\n\
+         cli-desktop [--wallpaper <image>] [--config-dir <path>] [--force-tty] [--force-emoji] [--no-mouse-setup]\n\n\
          Options:\n  \
          --wallpaper, -w <image>   Set a background image once (saved to wallpaper.json)\n  \
          --config-dir <path>      Use this config directory instead of ~/.config/cli-desktop\n  \
@@ -85,10 +85,10 @@ fn main() -> Result<()> {
     if !tmux::is_inside_tmux() {
         eprintln!(
             "This program must run inside a tmux session.\n\
-             Start it like this, for example:\n\n    tmux new -s desktop ./rust-desktop\n\n\
-             (use the actual path to the binary — a bare 'rust-desktop' only\n\
+             Start it like this, for example:\n\n    tmux new -s desktop ./cli-desktop\n\n\
+             (use the actual path to the binary — a bare 'cli-desktop' only\n\
              works if it's on your $PATH, e.g. after 'cargo install --path .')\n\n\
-             or start tmux first and then run rust-desktop inside a session."
+             or start tmux first and then run cli-desktop inside a session."
         );
         std::process::exit(1);
     }
@@ -149,7 +149,7 @@ fn main() -> Result<()> {
     let (cols, rows) = terminal::size()?;
     let mut desktop = Desktop::new(cfg, cols, rows, wallpaper_arg, capabilities)?;
 
-    // Warn (without blocking) if another rust-desktop instance already
+    // Warn (without blocking) if another cli-desktop instance already
     // seems to be running in this same tmux session — this is a common
     // source of confusion, and can trigger tmux errors like `create window
     // failed: index N in use` if both instances happen to open a window at

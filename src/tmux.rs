@@ -82,7 +82,7 @@ fn next_free_index(session: &str) -> Result<u32> {
 ///
 /// If tmux reports the target index as already in use (`create window
 /// failed: index N in use` — this can happen if another window was created
-/// concurrently, e.g. from a second rust-desktop instance running in the
+/// concurrently, e.g. from a second cli-desktop instance running in the
 /// same session, or via tmux's own `Ctrl-b c` binding, right between us
 /// listing windows and creating one), this retries a couple of times with
 /// an index we compute ourselves from a fresh `list-windows`, instead of
