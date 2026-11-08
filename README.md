@@ -22,9 +22,21 @@ image) is operated with the mouse in plain text mode.
 - **Moving icons**: drag with the left mouse button held down. On release,
   the icon automatically snaps to an invisible grid and steps around other
   icons instead of overlapping them (snap-to-grid).
+- **Icons keep their place when the window is resized.** Positions are
+  stored *relative to the window edges* (as a fraction, e.g. "4 % from the
+  left, 22 % from the top"), not as absolute character coordinates — so
+  shrinking the terminal moves the icons along with it instead of leaving
+  them stranded off-screen, and enlarging it again restores exactly the
+  layout you set up. If a small window squeezes icons on top of each other
+  (or under the trash), they're nudged apart for display only, without
+  touching the stored positions.
 - **Keyboard control for icons**: `Tab`/arrow down/right selects the next
   icon, `Shift+Tab`/arrow up/left the previous one, `Enter` opens the
   selected icon – fully usable without a mouse.
+- **Adding programs**: right-click an empty spot on the desktop (or press
+  `a`) to open a menu of **424 well-known command-line / text-UI programs**
+  in 23 categories; click one and it's placed on the desktop as an icon
+  (see "Adding programs from the catalog" below).
 - **Deleting**: drag an icon onto the trash (happens immediately, since
   it's a deliberate drag gesture), or right-click an icon (asks for
   confirmation first, as a safety measure: `j`/`y` confirms, `n`/`Esc`
@@ -182,9 +194,12 @@ milliseconds, which looks just like the click did nothing. The bundled
 default icons already fall back through a few common alternatives and print
 a clear message instead of silently vanishing if none of them are
 available (see the icon fields below) — if you see this with a custom icon
-you added yourself, wrap its `command` in a similar
-`sh -c '<program> || (echo not found; read x)'` pattern so the window stays
-open to show what went wrong.
+you added yourself, wrap its `command` the same way, e.g.
+`sh -c 'if command -v myprog >/dev/null 2>&1; then myprog; else echo "myprog not found"; read x; fi'`,
+so the window stays open to show what went wrong. (Test for existence with
+`command -v` rather than chaining with `||`: `myprog || (echo not found; read x)`
+tests the program's *exit status*, so a program that runs fine but exits
+non-zero would wrongly trigger the "not found" branch.)
 
 **`tmux new -s desktop cli-desktop` exits immediately / does nothing.**
 This almost always means the `cli-desktop` binary isn't on your `$PATH` —
@@ -249,15 +264,99 @@ running in this session (`tmux list-windows`, or watch for the "another
 cli-desktop instance seems to already be running" warning shown at
 startup and in the status line).
 
+## Adding programs from the catalog
+
+**Right-click an empty spot on the desktop** and a menu pops up with a
+catalog of 424 well-known command-line / text-UI programs. Pick one and it's
+put on the desktop as a new icon — at the spot you clicked (snapped to the
+grid and kept clear of other icons, exactly like a drag-and-drop). With no
+mouse (e.g. on the Linux console), press **`a`** instead: the menu opens in
+the middle of the screen and the icon goes to the first free spot.
+
+The menu has two panes — categories on the left, programs on the right:
+
+| Input | Action |
+|---|---|
+| click a category | show its programs |
+| click a program | add it as an icon |
+| scroll wheel | scroll the program list (over the category pane: switch category) |
+| click outside / right-click / `Esc` | close |
+| `↑` `↓` / `PgUp` `PgDn` / `Home` `End` | move the selection in the focused pane |
+| `Tab` / `←` `→` | switch between the category and program pane |
+| `Enter` | on a category: jump to its programs; on a program: add it |
+| *just start typing* | **filter all programs** by name, command, description or category (e.g. `git`, `music`, `ssh`); `Backspace` edits, the first `Esc` clears the filter |
+
+Programs found on your system are marked with a green `*` and the rest are
+shown dimmed (they can still be added — see below). Whether a program is
+"installed" is decided by searching `$PATH` plus the places tools often end
+up without being on a tmux server's `PATH`: `/usr/games`, `/usr/local/games`,
+`/usr/sbin`, `/sbin`, `~/.cargo/bin` and `~/.local/bin`. The icon's start
+command extends `PATH` the same way, so what's marked as installed is also
+what the icon can actually launch.
+
+| Category | Programs | Examples |
+|---|---|---|
+| System monitors | 25 | htop, btop, glances, nvtop, powertop |
+| Files & disk usage | 21 | ranger, mc, yazi, ncdu, gdu |
+| Editors | 27 | vim, nvim, nano, micro, helix, emacs -nw |
+| Git & development | 14 | lazygit, gitui, tig, lnav, mitmproxy |
+| Containers & cloud | 11 | k9s, lazydocker, ctop, kubetui |
+| Databases | 18 | sqlite3, psql, pgcli, harlequin, redis-cli |
+| Debugging & RE | 9 | gdb -tui, cgdb, radare2, hexedit |
+| Interpreters & REPLs | 39 | python3, ipython, node, ghci, julia, R |
+| Shells | 16 | bash, zsh, fish, nushell, xonsh |
+| Web browsers | 11 | lynx, w3m, elinks, browsh |
+| Network & torrents | 24 | nmtui, mtr, gping, iftop, termshark, rtorrent |
+| Remote & transfer | 6 | lftp, termscp, sshs, tmate |
+| Chat & social | 19 | irssi, weechat, gomuks, tut |
+| Email & news | 14 | mutt, neomutt, aerc, newsboat |
+| Music & audio | 24 | cmus, ncmpcpp, ncspot, cava, alsamixer |
+| Productivity & finance | 17 | calcurse, taskwarrior-tui, sc-im, cointop |
+| Calculators & math | 16 | bc, qalc, gnuplot, maxima |
+| Reading & reference | 7 | info, glow, navi, sdcv |
+| Games | 46 | nethack, crawl, angband, tetris clones, BSD games, typing tutors |
+| Fun & eye candy | 17 | cmatrix, sl, cbonsai, asciiquarium |
+| Terminal tools | 7 | zellij, screen, byobu, fzf, vtm |
+| System administration | 11 | aptitude, pacseek, cfdisk, systemctl-tui |
+| Quick info (prints & waits) | 25 | fastfetch, neofetch, df -h, free -h, uptime |
+
+**What an added icon does.** Its `command` (visible and editable in
+`icons.json`) is one `sh -c` script, so it works regardless of your login
+shell:
+
+- If the program **isn't installed**, the window shows `<name> is not
+  installed.` with an install hint and waits for Enter, instead of flashing
+  open and shut. (Adding such a program is allowed on purpose: you can set up
+  your layout first and install later.)
+- If it **fails within 3 seconds** (e.g. "must be root", "cannot open
+  display"), its exit status is shown and the window waits for Enter, so you
+  can actually read the error. A normal exit just closes the window.
+- Programs in the *Quick info* category only print something and exit, so
+  for those the window always waits for Enter after they finish.
+
+Adding the same program twice just selects the existing icon. The icon's
+glyph is the category's emoji (stored in `icons.json`; on terminals that
+can't show emoji — including the Linux console — it's drawn as `[X]`, `X`
+being the first letter of the name, see "Automatic detection").
+
+**Extending the catalog.** The catalog is a plain table in `src/catalog.rs`
+(`a("display name", "binary", "fixed args", "one-line description")` per
+program). To add your own, either append a line there and rebuild, or add an
+icon to `icons.json` by hand (see "Icon fields"). `cargo test` checks that
+every entry is well-formed, that names are unique, and that the generated
+start command is valid shell syntax for all programs.
+
 ## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
-| `q` / `Esc` | quit the desktop (instead cancels an open confirmation, if any) |
+| `q` / `Esc` / `Ctrl+C` | quit the desktop (instead cancels an open confirmation, if any) |
 | `Tab` / `↓` `→` | select the next icon |
 | `Shift+Tab` / `↑` `←` | select the previous icon |
 | `Shift+↑↓←→` | move the selected icon (keyboard equivalent of dragging it) |
 | `Enter` | open the selected icon |
+| `Delete` / `d` | delete the selected icon (asks for confirmation first) |
+| `a` | open the add-program menu (same as right-clicking the desktop) |
 | `j` / `y` | accept a pending confirmation (delete icon / empty trash) |
 | `n` / `Esc` | cancel a pending confirmation |
 | `r` | manually refresh the taskbar |
@@ -272,9 +371,9 @@ Settings live under `~/.config/cli-desktop/`, each part in its **own file**:
 
 | File | Contents |
 |---|---|
-| `~/.config/cli-desktop/icons.json` | desktop icons (name, glyph, position, command, singleton flag) |
+| `~/.config/cli-desktop/icons.json` | desktop icons (name, glyph, relative position, command, singleton flag) |
 | `~/.config/cli-desktop/trash.json` | icons moved to the trash |
-| `~/.config/cli-desktop/wallpaper.json` | path to the background image (`{"path": "..."}` or `{"path": null}`) |
+| `~/.config/cli-desktop/wallpaper.json` | path to the background image (`{"path": "..."}` or `{"path": null}`); `--wallpaper` stores it as an absolute path so it still resolves when started from another directory |
 | `~/.config/cli-desktop/settings.json` | time intervals (taskbar polling, clock, full redraw) |
 | `~/.config/cli-desktop/colors.json` | UI color scheme |
 | `~/.config/cli-desktop/instance.lock` | pid/session/window of the currently running instance (see "Troubleshooting") |
@@ -305,10 +404,22 @@ of `~/.config/cli-desktop` (see the "Running" section above).
   "glyph": "📊",
   "x": 4,
   "y": 14,
+  "rel_x": 0.04,
+  "rel_y": 0.58,
   "command": "sh -c 'htop || top'",
   "singleton": true
 }
 ```
+
+`rel_x` / `rel_y` are the icon's real position: a fraction from `0.0`
+(flush with the left / top edge) to `1.0` (flush with the right / bottom
+edge) of the space available to that icon (an icon's own width is taken
+into account, so a wide label never runs past the last column). `x` / `y`
+are just the position in character cells for the *current* window size,
+recomputed from `rel_x` / `rel_y` on startup and on every resize and written
+out for readability; edit the `rel_*` values to move an icon by hand. An
+`icons.json` from an older version without `rel_*` is migrated
+automatically on first start, from its absolute `x` / `y`.
 
 `singleton: true` means: when opening it, the desktop first checks via
 `tmux list-windows` whether a window with this icon's name already exists;
@@ -317,13 +428,16 @@ programs you only ever want a single instance of anyway (process monitor,
 possibly a file manager). If the field is missing in an older `icons.json`,
 it's automatically treated as `false`.
 
-The bundled default icons wrap their `command` in a `sh -c '<program> ||
-<alternative> || (echo ...; read x)'` fallback chain (see
-`default_icons()` in `src/config.rs`), so that if none of the preferred
-programs are installed, the tmux window stays open with a clear message
-instead of flashing open and closing again instantly (see "Troubleshooting"
-above). Custom icons you add yourself don't get this automatically — if you
-want the same safety net, wrap your own `command` the same way.
+The bundled default icons wrap their `command` in a `sh -c 'if command -v
+<program> ...; then <program>; elif ...; else echo ...; read x; fi'` chain
+(see `first_available()` in `src/config.rs`): the first program that
+actually exists is run, and if none do, the tmux window stays open with a
+clear message instead of flashing open and closing again instantly (see
+"Troubleshooting" above). Existence is checked with `command -v`, **not**
+with `a || b`, which would test exit *status* and therefore e.g. start `top`
+right after `htop` was closed with a non-zero status. Custom icons you add
+yourself don't get this automatically — if you want the same safety net,
+wrap your own `command` the same way.
 
 ### Time intervals (`settings.json`)
 
@@ -362,9 +476,21 @@ restarting the program.
   "status_fg": "grey",
   "clock_fg": "white",
   "clock_bg": "black",
-  "wallpaper_fallback_fg": "darkgrey"
+  "wallpaper_fallback_fg": "darkgrey",
+  "menu_fg": "white",
+  "menu_bg": "black",
+  "menu_border_fg": "cyan",
+  "menu_selected_fg": "black",
+  "menu_selected_bg": "cyan",
+  "menu_dim_fg": "darkgrey",
+  "menu_ok_fg": "green"
 }
 ```
+
+The `menu_*` keys style the add-program menu (`menu_dim_fg`: programs that
+aren't installed; `menu_ok_fg`: the `*` marking installed ones). Keys that
+are missing from the file simply use their defaults, so a `colors.json` from
+an older version keeps working.
 
 Each value is either a color name (`black`, `red`, `green`, `yellow`,
 `blue`, `magenta`, `cyan`, `white`, `grey`/`gray`, `darkgrey`/`darkgray`, as
@@ -407,6 +533,8 @@ src/
   tmux.rs        Wrapper around the tmux CLI (list/new/select/kill-window)
   ascii_art.rs   Image → ASCII conversion (image crate) + fallback pattern
   caps.rs        Detection of tty vs. terminal emulator, Unicode/emoji/color depth
+  catalog.rs     Catalog of 424 CLI/TUI programs, installed-detection, start-command generator
+  menu.rs        The right-click "add program" popup (state, keyboard/mouse handling, drawing)
   config.rs      Configuration persistence (icons/trash/wallpaper/settings/colors, each its own JSON file)
 ```
 
@@ -417,6 +545,12 @@ src/
 - Drag & drop and double-clicking need a terminal with working mouse
   reporting (SGR mouse mode); most modern terminals (Alacritty, kitty,
   iTerm2, GNOME Terminal, Windows Terminal via WSL) support this.
+- **Very small windows can't fit everything.** Icons follow the window size
+  proportionally and are nudged apart if they'd overlap, but a window that's
+  only a few rows tall simply doesn't have room for four two-line icons plus
+  the trash; there, some icons can still partly overlap. Nothing is lost —
+  the stored positions aren't changed, so enlarging the window restores the
+  layout, and every icon stays reachable with `Tab` / `Enter`.
 - The trash only deletes the desktop shortcut (the icon entry in the JSON
   configuration), not real files.
 - **Snap-to-grid**: on release, the icon's position is rounded to a 10×4

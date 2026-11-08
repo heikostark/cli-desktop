@@ -1,8 +1,11 @@
 use crate::ascii_art::{self, AsciiFrame};
+use crate::catalog;
 use crate::caps::{Capabilities, ColorSupport};
 use crate::config::{DesktopConfig, Icon};
+use crate::menu::{Menu, MenuAction, MenuPalette};
 use crate::tmux::{self, TmuxWindow};
 use anyhow::Result;
+use crossterm::event::{KeyEvent, MouseEvent};
 use crossterm::style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor};
 use crossterm::{cursor, queue, terminal};
 use std::io::Write;
@@ -45,6 +48,9 @@ pub struct Desktop {
     /// the trash) – deliberately dragging an icon onto the trash doesn't
     /// ask for extra confirmation.
     pub pending: PendingConfirm,
+    /// The open right-click "add program" menu, if any. While it's open it
+    /// receives all keyboard and mouse input.
+    pub menu: Option<Menu>,
     // Hit boxes are recomputed on every render so clicks land exactly where
     // things were actually drawn.
     pub taskbar_boxes: Vec<(u16, u16, u32)>, // (x_start, x_end, window_index)
@@ -67,7 +73,7 @@ impl Desktop {
     ) -> Result<Self> {
         let session = tmux::current_session().unwrap_or_else(|_| "?".into());
         let own_window = tmux::own_window_index();
-        let wallpaper = load_wallpaper(
+        let (wallpaper, wallpaper_warning) = load_wallpaper(
             wallpaper_path.as_deref().or(cfg.wallpaper.as_deref()),
             cols,
             rows.saturating_sub(2),
@@ -82,20 +88,27 @@ impl Desktop {
         let (status, selected_icon) = if caps.is_console_tty {
             (
                 "Mouse may not work on a console: Tab/arrows = select · Enter = open · \
-                 Shift+arrows = move · 'i' = system info · q = quit"
+                 a = add program · Shift+arrows = move · d = delete · q = quit"
                     .to_string(),
                 if cfg.icons.is_empty() { None } else { Some(0) },
             )
         } else {
             (
-                "Double-click = open · Drag = move · drag onto trash = delete · \
-                 'i' = system info · q = quit"
+                "Double-click = open · Right-click = add program · Drag = move · \
+                 drag onto trash = delete · q = quit"
                     .to_string(),
                 None,
             )
         };
 
-        Ok(Self {
+        // A wallpaper that failed to load is easy to miss on stderr (which the
+        // alternate screen hides), so surface it in the status line as well.
+        let status = match wallpaper_warning {
+            Some(w) => format!("{} {}", w, status),
+            None => status,
+        };
+
+        let mut desktop = Self {
             cfg,
             caps,
             session,
@@ -109,15 +122,33 @@ impl Desktop {
             last_click: None,
             status,
             pending: PendingConfirm::None,
+            menu: None,
             taskbar_boxes: Vec::new(),
             trash_box: (0, 0, 0, 0),
-        })
+        };
+
+        // Icons from an older icons.json have no relative position yet:
+        // derive it once from their absolute x/y, then persist it.
+        if desktop.migrate_missing_rel() {
+            let _ = desktop.cfg.save_icons();
+        }
+        desktop.apply_layout();
+        Ok(desktop)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
-        self.wallpaper = load_wallpaper(self.cfg.wallpaper.as_deref(), cols, rows.saturating_sub(2), &self.caps);
+        let (wallpaper, warning) =
+            load_wallpaper(self.cfg.wallpaper.as_deref(), cols, rows.saturating_sub(2), &self.caps);
+        self.wallpaper = wallpaper;
+        if let Some(w) = warning {
+            self.status = w;
+        }
+        // Icon positions are stored relative to the window edges, so they
+        // follow the new size instead of ending up off-screen.
+        self.apply_layout();
+        self.close_menu_if_too_small();
     }
 
     pub fn show_system_info(&mut self) {
@@ -230,6 +261,8 @@ impl Desktop {
             glyph: trash_glyph,
             x: tx,
             y: ty,
+            rel_x: None,
+            rel_y: None,
             command: String::new(),
             singleton: false,
         };
@@ -260,7 +293,7 @@ impl Desktop {
         for w in &self.windows {
             let label = format!(" {}:{} ", w.index, w.name);
             let start = cursor_x;
-            let end = start + label.len() as u16;
+            let end = start + label.width() as u16;
             if end >= self.cols {
                 break;
             }
@@ -304,6 +337,17 @@ impl Desktop {
         out.write_all(status.as_bytes())?;
         queue!(out, ResetColor)?;
 
+        // 6) The "add program" menu, on top of everything else.
+        self.close_menu_if_too_small();
+        if self.menu.is_some() {
+            let pal = self.menu_palette();
+            let (cols, rows, unicode) = (self.cols, self.rows, self.caps.unicode);
+            if let Some(menu) = self.menu.as_mut() {
+                menu.ensure_visible(cols, rows);
+                menu.render(out, cols, rows, &pal, unicode)?;
+            }
+        }
+
         out.flush()?;
         Ok(())
     }
@@ -328,6 +372,142 @@ impl Desktop {
             .iter()
             .find(|(s, e, _)| x >= *s && x < *e)
             .map(|(_, _, idx)| *idx)
+    }
+
+    // ---- "Add program" menu ----
+
+    fn menu_palette(&self) -> MenuPalette {
+        let t = &self.cfg.theme;
+        MenuPalette {
+            fg: self.theme_color(&t.menu_fg),
+            bg: self.theme_color(&t.menu_bg),
+            border: self.theme_color(&t.menu_border_fg),
+            sel_fg: self.theme_color(&t.menu_selected_fg),
+            sel_bg: self.theme_color(&t.menu_selected_bg),
+            dim: self.theme_color(&t.menu_dim_fg),
+            ok: self.theme_color(&t.menu_ok_fg),
+        }
+    }
+
+    /// Open the menu. `anchor` is where the popup's corner goes and
+    /// `place_at` the desktop cell the new icon should get (both the
+    /// right-click position); with `None` the popup is centered and the new
+    /// icon goes to the first free spot (keyboard-opened menu).
+    pub fn open_menu(&mut self, anchor: Option<(u16, u16)>, place_at: Option<(u16, u16)>) {
+        let menu = Menu::new(anchor, place_at);
+        if menu.geometry(self.cols, self.rows).is_none() {
+            self.status = "Window too small for the program menu (needs at least 44x11).".into();
+            return;
+        }
+        self.selected_icon = None;
+        self.menu = Some(menu);
+    }
+
+    fn close_menu_if_too_small(&mut self) {
+        let too_small = self
+            .menu
+            .as_ref()
+            .map(|m| m.geometry(self.cols, self.rows).is_none())
+            .unwrap_or(false);
+        if too_small {
+            self.menu = None;
+            self.status = "Program menu closed: window too small.".into();
+        }
+    }
+
+    pub fn menu_key(&mut self, k: KeyEvent) {
+        let (cols, rows) = (self.cols, self.rows);
+        let action = match self.menu.as_mut() {
+            Some(m) => m.handle_key(k, cols, rows),
+            None => return,
+        };
+        self.apply_menu_action(action);
+    }
+
+    pub fn menu_mouse(&mut self, m: MouseEvent) {
+        let (cols, rows) = (self.cols, self.rows);
+        let action = match self.menu.as_mut() {
+            Some(menu) => menu.handle_mouse(m, cols, rows),
+            None => return,
+        };
+        self.apply_menu_action(action);
+    }
+
+    fn apply_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::None => {}
+            MenuAction::Close => self.menu = None,
+            MenuAction::Add { cat, app } => {
+                let place_at = self.menu.as_ref().and_then(|m| m.place_at);
+                self.menu = None;
+                self.add_app(cat, app, place_at);
+            }
+        }
+    }
+
+    /// Put a catalog program on the desktop as a new icon: at `place_at`
+    /// if given (then snapped to the grid and kept clear of other icons,
+    /// exactly like a drop after dragging), otherwise at the first free spot.
+    fn add_app(&mut self, cat: usize, app: usize, place_at: Option<(u16, u16)>) {
+        let category = &catalog::CATALOG[cat];
+        let program = &category.apps[app];
+        let command = catalog::command_for(category, program);
+
+        // Already on the desktop? Select it instead of adding a duplicate.
+        if let Some(i) = self
+            .cfg
+            .icons
+            .iter()
+            .position(|ic| ic.name == program.name && ic.command == command)
+        {
+            self.selected_icon = Some(i);
+            self.status = format!("\"{}\" is already on the desktop.", program.name);
+            return;
+        }
+
+        // Ids stay unique even across icons currently in the trash.
+        let id = self
+            .cfg
+            .icons
+            .iter()
+            .chain(self.cfg.trash.iter())
+            .map(|i| i.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.cfg.icons.push(Icon {
+            id,
+            name: program.name.to_string(),
+            // Stored as the category's emoji; terminals that can't show
+            // emoji draw `[X]` instead (see `effective_glyph`).
+            glyph: category.emoji.to_string(),
+            x: 1,
+            y: 1,
+            rel_x: None,
+            rel_y: None,
+            command,
+            singleton: false,
+        });
+        let idx = self.cfg.icons.len() - 1;
+        let (x, y) = place_at.unwrap_or((1, 1));
+        let (cx, cy) = self.clamp_icon_pos(idx, x as i32, y as i32);
+        self.cfg.icons[idx].x = cx;
+        self.cfg.icons[idx].y = cy;
+        // Snaps to the grid, resolves collisions (with (1,1) as the start
+        // this finds the first free spot), stores the relative position
+        // and saves icons.json.
+        self.snap_and_resolve(idx);
+        self.selected_icon = Some(idx);
+
+        let installed = catalog::is_installed(program.bin, &catalog::search_dirs());
+        self.status = if installed {
+            format!("\"{}\" added to the desktop.", program.name)
+        } else {
+            format!(
+                "\"{}\" added, but it doesn't seem to be installed (the icon will say so).",
+                program.name
+            )
+        };
     }
 
     // ---- Keyboard navigation ----
@@ -377,7 +557,7 @@ impl Desktop {
         let Some(icon) = self.cfg.icons.get(idx) else { return };
         let nx = icon.x as i32 + dx * GRID_W as i32;
         let ny = icon.y as i32 + dy * GRID_H as i32;
-        let (cx, cy) = self.clamp_icon_pos(nx, ny);
+        let (cx, cy) = self.clamp_icon_pos(idx, nx, ny);
         if let Some(icon) = self.cfg.icons.get_mut(idx) {
             icon.x = cx;
             icon.y = cy;
@@ -398,6 +578,15 @@ impl Desktop {
     pub fn request_delete(&mut self, idx: usize) {
         if idx < self.cfg.icons.len() {
             self.pending = PendingConfirm::DeleteIcon(idx);
+        }
+    }
+
+    /// Keyboard equivalent of right-clicking an icon: ask to delete the
+    /// currently selected one (needed on the console, where there's no mouse).
+    pub fn request_delete_selected(&mut self) {
+        match self.selected_icon {
+            Some(idx) => self.request_delete(idx),
+            None => self.status = "No icon selected — press Tab first.".into(),
         }
     }
 
@@ -497,6 +686,8 @@ impl Desktop {
         if let Some(icon) = self.cfg.trash.pop() {
             self.status = format!("\"{}\" restored.", icon.name);
             self.cfg.icons.push(icon);
+            self.migrate_missing_rel();
+            self.apply_layout();
             let _ = self.cfg.save_icons();
             let _ = self.cfg.save_trash();
         } else {
@@ -504,21 +695,135 @@ impl Desktop {
         }
     }
 
-    pub fn clamp_icon_pos(&self, x: i32, y: i32) -> (u16, u16) {
-        let max_x = self.cols.saturating_sub(6) as i32;
-        let max_y = self.rows.saturating_sub(5) as i32;
-        (x.clamp(0, max_x.max(0)) as u16, y.clamp(1, max_y.max(1)) as u16)
+    /// Allowed range for an icon's top-left cell: `(min_x, max_x, min_y, max_y)`.
+    /// The right edge depends on the icon's own width, so a wide label like
+    /// "Processes" can never run past the last column (where the terminal
+    /// would wrap it onto the next line); the bottom edge leaves room for
+    /// the taskbar and status line.
+    fn bounds_for(&self, icon: &Icon) -> (u16, u16, u16, u16) {
+        let w = icon_rect(icon, &self.caps).2;
+        let max_x = self.cols.saturating_sub(w);
+        let max_y = self.rows.saturating_sub(5).max(1);
+        (0, max_x, 1, max_y)
+    }
+
+    /// The trash icon's on-screen rectangle (x, y, width, height). Its width
+    /// is `max(glyph, "Trash") + 2` = 7 in both the emoji and ASCII variants.
+    fn trash_rect(&self) -> (u16, u16, u16, u16) {
+        let (tx, ty) = self.trash_pos();
+        (tx, ty, 7, 2)
+    }
+
+    pub fn clamp_icon_pos(&self, idx: usize, x: i32, y: i32) -> (u16, u16) {
+        let Some(icon) = self.cfg.icons.get(idx) else { return (0, 1) };
+        let (min_x, max_x, min_y, max_y) = self.bounds_for(icon);
+        (
+            x.clamp(min_x as i32, max_x as i32) as u16,
+            y.clamp(min_y as i32, max_y as i32) as u16,
+        )
+    }
+
+    /// Compute `rel_x`/`rel_y` for icon `idx` from its current cell position.
+    fn store_rel(&mut self, idx: usize) {
+        let Some(icon) = self.cfg.icons.get(idx) else { return };
+        let (min_x, max_x, min_y, max_y) = self.bounds_for(icon);
+        let frac = |v: u16, min: u16, max: u16| -> f32 {
+            let span = max.saturating_sub(min);
+            if span == 0 {
+                return 0.0;
+            }
+            let f = (v.saturating_sub(min) as f32 / span as f32).clamp(0.0, 1.0);
+            // Round so icons.json stays tidy (0.0455 rather than 0.045454543).
+            (f * 10000.0).round() / 10000.0
+        };
+        let (rx, ry) = (frac(icon.x, min_x, max_x), frac(icon.y, min_y, max_y));
+        let icon = &mut self.cfg.icons[idx];
+        icon.rel_x = Some(rx);
+        icon.rel_y = Some(ry);
+    }
+
+    /// Give every icon that has no relative position yet (older config
+    /// files) one, derived from its absolute x/y. Returns whether anything changed.
+    fn migrate_missing_rel(&mut self) -> bool {
+        let mut changed = false;
+        for idx in 0..self.cfg.icons.len() {
+            let icon = &self.cfg.icons[idx];
+            if icon.rel_x.is_none() || icon.rel_y.is_none() {
+                self.store_rel(idx);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Set icon `idx`'s cell position from its stored relative position
+    /// for the current window size.
+    fn place_from_rel(&mut self, idx: usize) {
+        let Some(icon) = self.cfg.icons.get(idx) else { return };
+        let (min_x, max_x, min_y, max_y) = self.bounds_for(icon);
+        let rx = icon.rel_x.unwrap_or(0.0).clamp(0.0, 1.0);
+        let ry = icon.rel_y.unwrap_or(0.0).clamp(0.0, 1.0);
+        let x = min_x + (rx * max_x.saturating_sub(min_x) as f32).round() as u16;
+        let y = min_y + (ry * max_y.saturating_sub(min_y) as f32).round() as u16;
+        let icon = &mut self.cfg.icons[idx];
+        icon.x = x;
+        icon.y = y;
+    }
+
+    /// Recompute every icon's cell position from its relative position for
+    /// the current window size, then keep them from piling up on each other.
+    /// Called at startup and on every resize.
+    pub fn apply_layout(&mut self) {
+        for idx in 0..self.cfg.icons.len() {
+            self.place_from_rel(idx);
+        }
+        self.resolve_overlaps();
+    }
+
+    /// Nudge icons that overlap an earlier icon or the trash out of the way.
+    ///
+    /// This only changes where icons are *drawn*, never their stored
+    /// `rel_x`/`rel_y`: shrinking the window squeezes the proportional
+    /// layout together (and could stack icons on top of each other, where
+    /// they'd look like they vanished), but enlarging it again restores
+    /// exactly the layout you set up. Bounded, so it can't spin forever
+    /// when the window is simply too small to fit everything.
+    fn resolve_overlaps(&mut self) {
+        let trash = self.trash_rect();
+        for i in 0..self.cfg.icons.len() {
+            let (_, max_x, min_y, max_y) = self.bounds_for(&self.cfg.icons[i]);
+            for _ in 0..500 {
+                let rect = icon_rect(&self.cfg.icons[i], &self.caps);
+                let collides = rects_overlap(rect, trash)
+                    || (0..i).any(|j| rects_overlap(rect, icon_rect(&self.cfg.icons[j], &self.caps)));
+                if !collides {
+                    break;
+                }
+                let icon = &mut self.cfg.icons[i];
+                if icon.y < max_y {
+                    icon.y += 1;
+                } else if icon.x + rect.2 < max_x {
+                    icon.x += rect.2 + 1;
+                    icon.y = min_y;
+                } else {
+                    break; // no free spot in a window this small
+                }
+            }
+        }
     }
 
     /// After dragging (drag & drop), snap the icon's position to the grid
     /// and, if that makes it overlap another icon, look for a free spot
-    /// nearby (collision avoidance). Saves `icons.json` afterwards.
+    /// nearby (collision avoidance). Then store the result as the icon's
+    /// new relative position and save `icons.json`.
     pub fn snap_and_resolve(&mut self, idx: usize) {
         if idx >= self.cfg.icons.len() {
             return;
         }
-        let max_x = self.cols.saturating_sub(6).max(1);
-        let max_y = self.rows.saturating_sub(5).max(1);
+        let (_, bx, _, by) = self.bounds_for(&self.cfg.icons[idx]);
+        let max_x = bx.max(1);
+        let max_y = by.max(1);
+        let trash = self.trash_rect();
 
         // 1) Snap to the grid
         {
@@ -529,17 +834,18 @@ impl Desktop {
             icon.y = gy.clamp(1, max_y);
         }
 
-        // 2) Avoid colliding with other icons: first move down within the
-        // column, then jump to the next column. Bounded search (max 80
-        // attempts) so this can never get stuck.
+        // 2) Avoid colliding with other icons or the trash: first move down
+        // within the column, then jump to the next column. Bounded search
+        // (max 80 attempts) so this can never get stuck.
         for _ in 0..80 {
             let rect = icon_rect(&self.cfg.icons[idx], &self.caps);
-            let collides = self
-                .cfg
-                .icons
-                .iter()
-                .enumerate()
-                .any(|(j, other)| j != idx && rects_overlap(rect, icon_rect(other, &self.caps)));
+            let collides = rects_overlap(rect, trash)
+                || self
+                    .cfg
+                    .icons
+                    .iter()
+                    .enumerate()
+                    .any(|(j, other)| j != idx && rects_overlap(rect, icon_rect(other, &self.caps)));
             if !collides {
                 break;
             }
@@ -554,6 +860,7 @@ impl Desktop {
             }
         }
 
+        self.store_rel(idx);
         let _ = self.cfg.save_icons();
     }
 
@@ -699,18 +1006,26 @@ fn truncate_to_width(s: &str, max_width: u16) -> String {
     out
 }
 
-fn load_wallpaper(path: Option<&str>, cols: u16, rows: u16, caps: &Capabilities) -> AsciiFrame {
+/// Load the wallpaper, falling back to the procedural pattern if it can't
+/// be loaded. Returns the frame plus, if loading failed, a short warning.
+///
+/// The warning is returned instead of printed: this also runs on every
+/// terminal resize, i.e. while the alternate screen and raw mode are
+/// active, where a stray `eprintln!` would be drawn straight into the UI.
+/// The caller decides where to show it (the status line).
+fn load_wallpaper(path: Option<&str>, cols: u16, rows: u16, caps: &Capabilities) -> (AsciiFrame, Option<String>) {
     let unicode = caps.unicode;
     let colorize = caps.color != ColorSupport::Basic16;
+    let mut warning = None;
     if let Some(p) = path {
         match ascii_art::from_image(p, cols, rows, unicode, colorize) {
-            Ok(frame) => return frame,
+            Ok(frame) => return (frame, None),
             Err(e) => {
-                eprintln!("Warning: could not load the wallpaper ({}), using the fallback pattern instead.", e);
+                warning = Some(format!("Wallpaper not loaded ({}) - using fallback pattern.", e));
             }
         }
     }
-    ascii_art::procedural(cols, rows, unicode)
+    (ascii_art::procedural(cols, rows, unicode), warning)
 }
 
 /// Convert the image's original RGB color into a color this terminal can

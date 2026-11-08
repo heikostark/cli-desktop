@@ -51,14 +51,15 @@ pub fn list_windows(session: &str) -> Result<Vec<TmuxWindow>> {
 
     let mut windows = Vec::new();
     for line in raw.lines() {
-        let parts: Vec<&str> = line.splitn(3, '|').collect();
-        if parts.len() != 3 {
-            continue;
-        }
+        // Format is `index|name|active`. The window name is user-controlled
+        // and may itself contain '|', so split the index off the left and the
+        // active flag off the right; whatever is left in the middle is the name.
+        let Some((index, rest)) = line.split_once('|') else { continue };
+        let Some((name, active)) = rest.rsplit_once('|') else { continue };
         windows.push(TmuxWindow {
-            index: parts[0].parse().unwrap_or(0),
-            name: parts[1].to_string(),
-            active: parts[2] == "1",
+            index: index.parse().unwrap_or(0),
+            name: name.to_string(),
+            active: active == "1",
         });
     }
     Ok(windows)

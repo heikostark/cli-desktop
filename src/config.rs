@@ -25,8 +25,23 @@ pub struct Icon {
     pub name: String,
     /// One or two characters representing the icon in text mode, e.g. "[T]".
     pub glyph: String,
+    /// Current position in terminal cells. This is derived at runtime from
+    /// `rel_x`/`rel_y` for the current window size (and may be nudged to
+    /// avoid overlaps); it's written out for readability, but on load the
+    /// relative values below are what counts.
     pub x: u16,
     pub y: u16,
+    /// Position relative to the window edges, as a fraction of the space
+    /// available to this icon: `0.0` = flush with the left/top edge,
+    /// `1.0` = flush with the right/bottom edge. This is what's persisted
+    /// as the icon's "real" position, so icons keep their place when the
+    /// window is resized and never end up off-screen. `None` (e.g. in an
+    /// `icons.json` from an older version) is migrated automatically from
+    /// `x`/`y` on startup.
+    #[serde(default)]
+    pub rel_x: Option<f32>,
+    #[serde(default)]
+    pub rel_y: Option<f32>,
     /// Shell command opened as a new tmux window on double-click.
     pub command: String,
     /// If `true`: before opening, first check whether a tmux window with
@@ -70,6 +85,10 @@ impl Default for Settings {
 /// terminal supports truecolor/256 colors; a tty console automatically
 /// falls back to the 16 basic colors, see `caps.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Missing keys fall back to their defaults, so a `colors.json` written by an
+// older version (without the menu colors below) still loads instead of being
+// treated as corrupt and moved aside.
+#[serde(default)]
 pub struct Theme {
     pub icon_fg: String,
     pub label_fg: String,
@@ -88,6 +107,16 @@ pub struct Theme {
     /// Color of the wallpaper characters when there's no color support
     /// (tty console) or no original color could be computed.
     pub wallpaper_fallback_fg: String,
+    /// The right-click "add program" menu.
+    pub menu_fg: String,
+    pub menu_bg: String,
+    pub menu_border_fg: String,
+    pub menu_selected_fg: String,
+    pub menu_selected_bg: String,
+    /// Programs from the catalog that aren't installed.
+    pub menu_dim_fg: String,
+    /// The `*` marking installed programs.
+    pub menu_ok_fg: String,
 }
 
 impl Default for Theme {
@@ -108,6 +137,13 @@ impl Default for Theme {
             clock_fg: "white".into(),
             clock_bg: "black".into(),
             wallpaper_fallback_fg: "darkgrey".into(),
+            menu_fg: "white".into(),
+            menu_bg: "black".into(),
+            menu_border_fg: "cyan".into(),
+            menu_selected_fg: "black".into(),
+            menu_selected_bg: "cyan".into(),
+            menu_dim_fg: "darkgrey".into(),
+            menu_ok_fg: "green".into(),
         }
     }
 }
@@ -198,14 +234,14 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<Option<T>> 
 }
 
 /// Generate a backup file name with a Unix timestamp, e.g. `icons.bak-1732900000.json`.
-fn backup_path(path: &PathBuf) -> PathBuf {
+fn backup_path(path: &std::path::Path) -> PathBuf {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("config");
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("json");
-    let mut backup = path.clone();
+    let mut backup = path.to_path_buf();
     backup.set_file_name(format!("{stem}.bak-{ts}.{ext}"));
     backup
 }
@@ -234,6 +270,20 @@ fn lock_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("instance.lock"))
 }
 
+/// Is `pid` still alive *and* actually one of our processes? Checking only
+/// that `/proc/<pid>` exists would give a false "another instance is
+/// running" warning whenever a stale lock's pid has since been reused by an
+/// unrelated program, so the process's command line is checked as well.
+fn pid_is_cli_desktop(pid: u32) -> bool {
+    let own_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| CONFIG_DIR_NAME.to_string());
+    std::fs::read(format!("/proc/{}/cmdline", pid))
+        .map(|raw| String::from_utf8_lossy(&raw).contains(&own_name))
+        .unwrap_or(false)
+}
+
 /// Check whether another cli-desktop instance already seems to be running
 /// in the same tmux session, then record ourselves as the current instance.
 ///
@@ -249,7 +299,7 @@ fn lock_path() -> Result<PathBuf> {
 pub fn check_and_write_instance_lock(session: &str, window: Option<u32>) -> Option<String> {
     let path = lock_path().ok()?;
     let warning = read_json::<InstanceLock>(&path).ok().flatten().and_then(|prev| {
-        let alive = std::path::Path::new(&format!("/proc/{}", prev.pid)).exists();
+        let alive = pid_is_cli_desktop(prev.pid);
         if alive && prev.session == session {
             let win = prev
                 .window
@@ -269,19 +319,36 @@ pub fn check_and_write_instance_lock(session: &str, window: Option<u32>) -> Opti
         }
     });
 
-    let mine = InstanceLock {
-        pid: std::process::id(),
-        session: session.to_string(),
-        window,
-    };
-    let _ = write_json(&path, &mine);
+    // If a live instance already holds the lock, leave it in place. Taking
+    // it over would mean that when this (second) instance exits first, the
+    // lock is gone while the original instance is still running, and that
+    // original would lose its duplicate-start protection for good.
+    if warning.is_none() {
+        let mine = InstanceLock {
+            pid: std::process::id(),
+            session: session.to_string(),
+            window,
+        };
+        let _ = write_json(&path, &mine);
+    }
     warning
 }
 
 /// Remove our own instance lock on clean shutdown, so a later run doesn't
 /// have to rely on the `/proc/<pid>` staleness check at all.
 pub fn clear_instance_lock() {
-    if let Ok(path) = lock_path() {
+    let Ok(path) = lock_path() else { return };
+    // Only remove the lock if it's still *ours*. With two instances in one
+    // session the second one overwrites the first's lock; when it exits it
+    // must not delete a lock that now describes a different, still-running
+    // instance, or that instance would silently lose its duplicate-start
+    // protection.
+    let ours = read_json::<InstanceLock>(&path)
+        .ok()
+        .flatten()
+        .map(|l| l.pid == std::process::id())
+        .unwrap_or(false);
+    if ours {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -364,7 +431,7 @@ impl DesktopConfig {
 /// Safely embed an arbitrary script as a single `sh -c '...'` argument, so
 /// nested quotes (e.g. inside `$SHELL`/`$EDITOR` values, or the messages
 /// below) can't break out of the generated shell command.
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -377,8 +444,38 @@ fn shell_quote(s: &str) -> String {
 /// parsed by tmux's *default-shell* — whatever the user's login shell
 /// happens to be — and shells like fish or csh/tcsh don't understand
 /// `||`/`(...)` the POSIX way, which could silently break the command.
-fn sh_c(script: &str) -> String {
+pub(crate) fn sh_c(script: &str) -> String {
     format!("sh -c {}", shell_quote(script))
+}
+
+/// Build a `sh` script that runs the first candidate program that actually
+/// *exists* (checked with `command -v`, using the candidate's first word so
+/// entries with arguments like `emacs -nw` work), and otherwise prints
+/// `not_found_msg` and waits for Enter so the tmux window doesn't vanish.
+///
+/// This deliberately is NOT written as `a || b || (echo ...)`. That chain
+/// tests each program's *exit status*, not whether it exists, so a program
+/// that runs perfectly well but exits non-zero — a shell whose last command
+/// failed before `exit`, an editor quit with `:cq`, htop closed with Ctrl+C
+/// — would wrongly fall through to the next alternative (starting `top`
+/// right after `htop`) or print a bogus "not found" message and then block
+/// on `read`.
+fn first_available(candidates: &[String], not_found_msg: &str, before_wait: &str) -> String {
+    let mut script = String::new();
+    for (i, cand) in candidates.iter().enumerate() {
+        let first_word = cand.split_whitespace().next().unwrap_or(cand);
+        let kw = if i == 0 { "if" } else { "elif" };
+        script.push_str(&format!(
+            "{kw} command -v {} >/dev/null 2>&1; then {cand}; ",
+            shell_quote(first_word)
+        ));
+    }
+    script.push_str(&format!(
+        "else echo {}; {}read x; fi",
+        shell_quote(not_found_msg),
+        before_wait
+    ));
+    script
 }
 
 /// A handful of sensible default icons with programs available on
@@ -395,8 +492,8 @@ fn sh_c(script: &str) -> String {
 /// Resolving the value ourselves and passing the plain result avoids that
 /// dependency entirely.
 ///
-/// Every command below also has a `|| (... ; read x)` fallback, all inside
-/// one `sh -c` call (see `sh_c` above). This matters because a tmux window
+/// Every command below also has a fallback (see `first_available`), all
+/// inside one `sh -c` call (see `sh_c` above). This matters because a tmux window
 /// closes itself the instant its command exits — if the target program
 /// doesn't exist on a given system (missing editor, missing process
 /// monitor, ...), the window would otherwise flash open and vanish again
@@ -416,30 +513,38 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "vi".to_string());
 
-    let terminal_cmd = sh_c(&format!(
-        "{shell} || (echo 'Shell not found: {shell}'; echo 'Set \\$SHELL or edit icons.json.'; read x)",
-        shell = resolved_shell
+    let terminal_cmd = sh_c(&first_available(
+        &[resolved_shell.clone()],
+        &format!("Shell not found: {resolved_shell}. Set SHELL or edit icons.json."),
+        "",
     ));
-    let editor_candidates: Vec<&str> = {
-        let mut c = vec![resolved_editor.as_str()];
+    let editor_candidates: Vec<String> = {
+        let mut c = vec![resolved_editor.clone()];
         for alt in ["vi", "nano"] {
-            if !c.contains(&alt) {
-                c.push(alt);
+            if !c.iter().any(|x| x == alt) {
+                c.push(alt.to_string());
             }
         }
         c
     };
-    let editor_cmd = sh_c(&format!(
-        "{chain} || (echo 'No editor found ({tried} all missing).'; echo 'Install one, or edit icons.json.'; read x)",
-        chain = editor_candidates.join(" || "),
-        tried = editor_candidates.join(" / ")
+    let editor_cmd = sh_c(&first_available(
+        &editor_candidates,
+        &format!(
+            "No editor found ({} all missing). Install one, or edit icons.json.",
+            editor_candidates.join(" / ")
+        ),
+        "",
     ));
-    let files_cmd = sh_c(
-        "ranger || mc || (echo 'No file manager found (ranger / mc missing).'; ls -la; echo; echo 'Press enter to close.'; read x)"
-    );
-    let processes_cmd = sh_c(
-        "htop || top || (echo 'No process monitor found (htop / top missing).'; read x)"
-    );
+    let files_cmd = sh_c(&first_available(
+        &["ranger".to_string(), "mc".to_string()],
+        "No file manager found (ranger / mc missing). Press Enter to close.",
+        "ls -la; echo; ",
+    ));
+    let processes_cmd = sh_c(&first_available(
+        &["htop".to_string(), "top".to_string()],
+        "No process monitor found (htop / top missing). Press Enter to close.",
+        "",
+    ));
 
     vec![
         Icon {
@@ -448,6 +553,8 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
             glyph: g("🖥️", "[T]"),
             x: 4,
             y: 2,
+            rel_x: Some(0.04),
+            rel_y: Some(0.05),
             command: terminal_cmd,
             singleton: false,
         },
@@ -457,6 +564,8 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
             glyph: g("📝", "[E]"),
             x: 4,
             y: 6,
+            rel_x: Some(0.04),
+            rel_y: Some(0.22),
             command: editor_cmd,
             singleton: false,
         },
@@ -466,6 +575,8 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
             glyph: g("📁", "[D]"),
             x: 4,
             y: 10,
+            rel_x: Some(0.04),
+            rel_y: Some(0.40),
             command: files_cmd,
             singleton: false,
         },
@@ -475,6 +586,8 @@ fn default_icons(caps: &Capabilities) -> Vec<Icon> {
             glyph: g("📊", "[P]"),
             x: 4,
             y: 14,
+            rel_x: Some(0.04),
+            rel_y: Some(0.58),
             // A process monitor makes the most sense as a single instance:
             // double-clicking switches to an already-open "Processes"
             // window instead of opening another htop/top window.

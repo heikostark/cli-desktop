@@ -1,7 +1,9 @@
 mod ascii_art;
 mod caps;
+mod catalog;
 mod config;
 mod desktop;
+mod menu;
 mod tmux;
 
 use anyhow::{Context, Result};
@@ -58,6 +60,10 @@ fn print_help_and_exit() {
          Tab / Shift+Tab or arrow keys       switch icon selection\n  \
          Shift + arrow keys                  move the selected icon\n  \
          Enter                               open the selected icon\n  \
+         Delete / d                          delete the selected icon (asks first)\n  \
+         a                                   add a program to the desktop (menu)\n  \
+         Right-click on the desktop          add a program to the desktop (menu)\n  \
+         Ctrl+C                              quit\n  \
          q / Esc                             quit\n  \
          r                                   refresh the taskbar\n  \
          e                                   empty the trash (asks for confirmation)\n  \
@@ -93,8 +99,16 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    // Store the wallpaper as an absolute path: wallpaper.json is read again
+    // on later runs, often from a different working directory, where a
+    // relative path like "wp.png" would silently stop resolving.
     let wallpaper_arg = args.iter().position(|a| a == "--wallpaper" || a == "-w")
-        .and_then(|i| args.get(i + 1).cloned());
+        .and_then(|i| args.get(i + 1).cloned())
+        .map(|p| {
+            std::fs::canonicalize(&p)
+                .map(|abs| abs.to_string_lossy().into_owned())
+                .unwrap_or(p)
+        });
     let config_dir_arg = args.iter().position(|a| a == "--config-dir")
         .and_then(|i| args.get(i + 1).cloned());
     // For testing/debugging only: override detection manually.
@@ -222,10 +236,22 @@ fn main() -> Result<()> {
                 last_render = Instant::now();
             }
             Event::Key(k) => {
+                // While the add-program menu is open it gets every key press.
+                if desktop.menu.is_some() {
+                    desktop.menu_key(k);
+                    desktop.render(&mut out)?;
+                    continue;
+                }
                 // While a confirmation is pending (deleting an icon or
                 // emptying the trash), key presses are interpreted
                 // exclusively for that purpose.
+                let ctrl_c = k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c');
                 if desktop.has_pending() {
+                    if ctrl_c {
+                        desktop.cancel_pending();
+                        desktop.render(&mut out)?;
+                        continue;
+                    }
                     match k.code {
                         KeyCode::Char('j') | KeyCode::Char('y') | KeyCode::Enter => {
                             desktop.confirm_pending()
@@ -239,7 +265,11 @@ fn main() -> Result<()> {
 
                 let shift = k.modifiers.contains(KeyModifiers::SHIFT);
                 match (shift, k.code) {
+                    // Raw mode turns Ctrl+C into an ordinary key event rather
+                    // than SIGINT, so it has to be handled explicitly.
+                    _ if ctrl_c => break,
                     (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => break,
+                    (_, KeyCode::Delete) | (_, KeyCode::Char('d')) => desktop.request_delete_selected(),
                     (false, KeyCode::Tab) | (false, KeyCode::Down) | (false, KeyCode::Right) => {
                         desktop.select_next()
                     }
@@ -258,6 +288,7 @@ fn main() -> Result<()> {
                         desktop.refresh_windows();
                         desktop.status = "Taskbar refreshed.".into();
                     }
+                    (_, KeyCode::Char('a')) => desktop.open_menu(None, None),
                     (_, KeyCode::Char('e')) => desktop.request_empty_trash(),
                     (_, KeyCode::Char('u')) => desktop.restore_last_trash(),
                     (_, KeyCode::Char('i')) => desktop.show_system_info(),
@@ -267,6 +298,24 @@ fn main() -> Result<()> {
                 last_render = Instant::now();
             }
             Event::Mouse(m) => {
+                // ...and every mouse event.
+                if desktop.menu.is_some() {
+                    desktop.menu_mouse(m);
+                    desktop.render(&mut out)?;
+                    continue;
+                }
+                // A confirmation is pending (it refers to an icon by index).
+                // Letting clicks/drags change the icon list underneath it
+                // would make the prompt point at a different icon than the
+                // one the user was asked about, so a click just dismisses
+                // the prompt and everything else is ignored meanwhile.
+                if desktop.has_pending() {
+                    if matches!(m.kind, MouseEventKind::Down(_)) {
+                        desktop.cancel_pending();
+                        desktop.render(&mut out)?;
+                    }
+                    continue;
+                }
                 match m.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(idx) = desktop.icon_at(m.column, m.row) {
@@ -307,6 +356,7 @@ fn main() -> Result<()> {
                         if let Some(drag) = &desktop.dragging {
                             let idx = drag.icon_idx;
                             let (nx, ny) = desktop.clamp_icon_pos(
+                                idx,
                                 m.column as i32 - drag.offset_x,
                                 m.row as i32 - drag.offset_y,
                             );
@@ -342,12 +392,16 @@ fn main() -> Result<()> {
                             // asks for confirmation first (protects against
                             // accidental clicks).
                             desktop.request_delete(idx);
+                        } else if m.row < desktop.rows.saturating_sub(2) {
+                            // Right-click on empty desktop: open the
+                            // add-program menu here, and place the new
+                            // icon at this spot.
+                            desktop.open_menu(Some((m.column, m.row)), Some((m.column, m.row)));
                         }
                         desktop.render(&mut out)?;
                     }
                     _ => {}
                 }
-                last_render = Instant::now();
             }
             _ => {}
         }
